@@ -1,5 +1,6 @@
 """
 API пользователей V-message: поиск, обновление профиля, список контактов.
+Маршрутизация через ?action=search|contacts|update
 """
 import json
 import os
@@ -31,10 +32,9 @@ def handler(event: dict, context) -> dict:
     if event.get("httpMethod") == "OPTIONS":
         return {"statusCode": 200, "headers": CORS, "body": ""}
 
-    path = event.get("path", "/")
-    method = event.get("httpMethod", "GET")
     qs = event.get("queryStringParameters") or {}
-    token = event.get("headers", {}).get("X-Session-Token") or event.get("headers", {}).get("x-session-token")
+    action = qs.get("action", "")
+    token = (event.get("headers") or {}).get("X-Session-Token") or (event.get("headers") or {}).get("x-session-token")
 
     body = {}
     if event.get("body"):
@@ -53,9 +53,9 @@ def handler(event: dict, context) -> dict:
 
     user_id = user[0]
 
-    # GET /search?q=username
-    if path.endswith("/search") and method == "GET":
-        q = (qs.get("q") or "").strip().lower()
+    # search
+    if action == "search":
+        q = (qs.get("q") or "").strip()
         if len(q) < 2:
             cur.close(); conn.close()
             return resp(400, {"error": "Минимум 2 символа"})
@@ -70,8 +70,8 @@ def handler(event: dict, context) -> dict:
             for r in rows
         ]})
 
-    # GET /contacts — люди, с кем есть чат
-    if path.endswith("/contacts") and method == "GET":
+    # contacts
+    if action == "contacts":
         cur.execute("""
             SELECT DISTINCT u.id, u.username, u.display_name, u.avatar_color, u.bio, u.is_online
             FROM vm_users u
@@ -87,8 +87,8 @@ def handler(event: dict, context) -> dict:
             for r in rows
         ]})
 
-    # POST /update — обновить профиль
-    if path.endswith("/update") and method == "POST":
+    # update
+    if action == "update":
         display_name = body.get("display_name")
         bio = body.get("bio")
         updates = []
@@ -110,4 +110,4 @@ def handler(event: dict, context) -> dict:
         return resp(200, {"ok": True, "user": {"id": row[0], "username": row[1], "display_name": row[2], "avatar_color": row[3], "bio": row[4]}})
 
     cur.close(); conn.close()
-    return resp(404, {"error": "Not found"})
+    return resp(404, {"error": "Unknown action"})

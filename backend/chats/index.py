@@ -1,5 +1,6 @@
 """
-API чатов и сообщений V-message: список чатов, создание, отправка сообщений, получение истории.
+API чатов и сообщений V-message.
+Маршрутизация через ?action=list|create|messages|send
 """
 import json
 import os
@@ -31,10 +32,10 @@ def handler(event: dict, context) -> dict:
     if event.get("httpMethod") == "OPTIONS":
         return {"statusCode": 200, "headers": CORS, "body": ""}
 
-    path = event.get("path", "/")
-    method = event.get("httpMethod", "GET")
     qs = event.get("queryStringParameters") or {}
-    token = event.get("headers", {}).get("X-Session-Token") or event.get("headers", {}).get("x-session-token")
+    action = qs.get("action", "")
+    method = event.get("httpMethod", "GET")
+    token = (event.get("headers") or {}).get("X-Session-Token") or (event.get("headers") or {}).get("x-session-token")
 
     body = {}
     if event.get("body"):
@@ -54,8 +55,8 @@ def handler(event: dict, context) -> dict:
 
     user_id = user[0]
 
-    # GET /list — список чатов пользователя
-    if path.endswith("/list") and method == "GET":
+    # list
+    if action == "list":
         cur.execute("""
             SELECT
                 c.id, c.type, c.name, c.avatar_color,
@@ -83,26 +84,25 @@ def handler(event: dict, context) -> dict:
                 "online": bool(r[7]) if r[1] == "private" else False,
                 "last_msg": r[8] or "",
                 "last_time": r[9].strftime("%H:%M") if r[9] else "",
-                "unread": r[10] or 0,
+                "unread": int(r[10]) if r[10] else 0,
             })
         cur.close()
         conn.close()
         return resp(200, {"ok": True, "chats": chats})
 
-    # POST /create — создать приватный чат или группу
-    if path.endswith("/create") and method == "POST":
+    # create
+    if action == "create":
         chat_type = body.get("type", "private")
         partner_username = body.get("partner_username")
 
         if chat_type == "private" and partner_username:
-            cur.execute("SELECT id, display_name, avatar_color FROM vm_users WHERE username=%s", (partner_username.lower().strip(),))
+            cur.execute("SELECT id FROM vm_users WHERE username=%s", (partner_username.lower().strip(),))
             partner = cur.fetchone()
             if not partner:
                 cur.close(); conn.close()
                 return resp(404, {"error": "Пользователь не найден"})
 
             partner_id = partner[0]
-            # Проверяем — вдруг чат уже есть
             cur.execute("""
                 SELECT c.id FROM vm_chats c
                 JOIN vm_chat_members a ON a.chat_id=c.id AND a.user_id=%s
@@ -133,8 +133,8 @@ def handler(event: dict, context) -> dict:
         cur.close(); conn.close()
         return resp(400, {"error": "Неверные параметры"})
 
-    # GET /messages?chat_id=X
-    if path.endswith("/messages") and method == "GET":
+    # messages
+    if action == "messages":
         chat_id = qs.get("chat_id")
         if not chat_id:
             cur.close(); conn.close()
@@ -157,7 +157,6 @@ def handler(event: dict, context) -> dict:
         """, (user_id, chat_id))
         rows = cur.fetchall()
 
-        # Помечаем как доставлено
         cur.execute("""
             UPDATE vm_messages SET msg_status='delivered'
             WHERE chat_id=%s AND sender_id != %s AND msg_status='sent'
@@ -175,8 +174,8 @@ def handler(event: dict, context) -> dict:
         cur.close(); conn.close()
         return resp(200, {"ok": True, "messages": messages})
 
-    # POST /send — отправить сообщение
-    if path.endswith("/send") and method == "POST":
+    # send
+    if action == "send":
         chat_id = body.get("chat_id")
         text = (body.get("text") or "").strip()
         if not chat_id or not text:
@@ -198,4 +197,4 @@ def handler(event: dict, context) -> dict:
         return resp(200, {"ok": True, "message": {"id": row[0], "time": row[1].strftime("%H:%M"), "text": text, "status": "sent", "out": True}})
 
     cur.close(); conn.close()
-    return resp(404, {"error": "Not found"})
+    return resp(404, {"error": "Unknown action"})

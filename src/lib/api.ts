@@ -58,13 +58,15 @@ export interface Message {
   out: boolean;
 }
 
-async function call(url: string, path: string, method = "GET", body?: object, token?: string | null) {
+async function call(baseUrl: string, action: string, method = "GET", body?: object, token?: string | null, extraQuery?: Record<string, string>) {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const t = token ?? getToken();
   if (t) headers["X-Session-Token"] = t;
 
-  const fullUrl = `${url}${path}`;
-  const res = await fetch(fullUrl, {
+  const qs = new URLSearchParams({ action, ...(extraQuery || {}) }).toString();
+  const url = `${baseUrl}?${qs}`;
+
+  const res = await fetch(url, {
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
@@ -75,39 +77,40 @@ async function call(url: string, path: string, method = "GET", body?: object, to
 // Auth
 export const authApi = {
   register: (username: string, display_name: string, password: string) =>
-    call(AUTH_URL, "/register", "POST", { username, display_name, password }, null),
+    call(AUTH_URL, "register", "POST", { username, display_name, password }, null),
 
   login: (username: string, password: string) =>
-    call(AUTH_URL, "/login", "POST", { username, password }, null),
+    call(AUTH_URL, "login", "POST", { username, password }, null),
 
-  me: () => call(AUTH_URL, "/me", "GET"),
+  me: () => call(AUTH_URL, "me", "GET"),
 
-  logout: () => call(AUTH_URL, "/logout", "POST"),
+  logout: () => call(AUTH_URL, "logout", "POST"),
 };
 
 // Chats
 export const chatsApi = {
-  list: () => call(CHATS_URL, "/list", "GET"),
+  list: () => call(CHATS_URL, "list", "GET"),
 
   createPrivate: (partner_username: string) =>
-    call(CHATS_URL, "/create", "POST", { type: "private", partner_username }),
+    call(CHATS_URL, "create", "POST", { type: "private", partner_username }),
 
   createGroup: (name: string) =>
-    call(CHATS_URL, "/create", "POST", { type: "group", name }),
+    call(CHATS_URL, "create", "POST", { type: "group", name }),
 
   messages: (chat_id: number) =>
-    call(CHATS_URL, `/messages?chat_id=${chat_id}`, "GET"),
+    call(CHATS_URL, "messages", "GET", undefined, undefined, { chat_id: String(chat_id) }),
 
   send: (chat_id: number, text: string) =>
-    call(CHATS_URL, "/send", "POST", { chat_id, text }),
+    call(CHATS_URL, "send", "POST", { chat_id, text }),
 };
 
 // Users
 export const usersApi = {
-  search: (q: string) => call(USERS_URL, `/search?q=${encodeURIComponent(q)}`, "GET"),
+  search: (q: string) =>
+    call(USERS_URL, "search", "GET", undefined, undefined, { q }),
 
-  contacts: () => call(USERS_URL, "/contacts", "GET"),
+  contacts: () => call(USERS_URL, "contacts", "GET"),
 
   update: (data: { display_name?: string; bio?: string }) =>
-    call(USERS_URL, "/update", "POST", data),
+    call(USERS_URL, "update", "POST", data),
 };

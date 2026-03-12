@@ -1,5 +1,6 @@
 """
 Аутентификация V-message: регистрация, вход, выход, проверка сессии.
+Маршрутизация через queryStringParameters: ?action=register|login|me|logout
 """
 import json
 import os
@@ -32,7 +33,9 @@ def handler(event: dict, context) -> dict:
     if event.get("httpMethod") == "OPTIONS":
         return {"statusCode": 200, "headers": CORS, "body": ""}
 
-    path = event.get("path", "/")
+    qs = event.get("queryStringParameters") or {}
+    action = qs.get("action", "")
+
     body = {}
     if event.get("body"):
         try:
@@ -40,8 +43,10 @@ def handler(event: dict, context) -> dict:
         except Exception:
             return resp(400, {"error": "Invalid JSON"})
 
-    # POST /register
-    if path.endswith("/register"):
+    token_header = (event.get("headers") or {}).get("X-Session-Token") or (event.get("headers") or {}).get("x-session-token")
+
+    # register
+    if action == "register":
         username = (body.get("username") or "").strip().lower()
         display_name = (body.get("display_name") or "").strip()
         password = body.get("password") or ""
@@ -53,7 +58,7 @@ def handler(event: dict, context) -> dict:
         if len(password) < 6:
             return resp(400, {"error": "Пароль минимум 6 символов"})
 
-        color = COLORS[hash(username) % len(COLORS)]
+        color = COLORS[abs(hash(username)) % len(COLORS)]
         token = secrets.token_hex(32)
 
         conn = get_conn()
@@ -77,8 +82,8 @@ def handler(event: dict, context) -> dict:
             cur.close()
             conn.close()
 
-    # POST /login
-    if path.endswith("/login"):
+    # login
+    if action == "login":
         username = (body.get("username") or "").strip().lower()
         password = body.get("password") or ""
 
@@ -105,16 +110,15 @@ def handler(event: dict, context) -> dict:
             "user": {"id": row[0], "username": row[1], "display_name": row[2], "avatar_color": row[3], "bio": row[4]}
         })
 
-    # GET /me
-    if path.endswith("/me"):
-        token = event.get("headers", {}).get("X-Session-Token") or event.get("headers", {}).get("x-session-token")
-        if not token:
+    # me
+    if action == "me":
+        if not token_header:
             return resp(401, {"error": "Нет токена"})
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
             "SELECT id, username, display_name, avatar_color, bio FROM vm_users WHERE session_token=%s",
-            (token,)
+            (token_header,)
         )
         row = cur.fetchone()
         cur.close()
@@ -123,16 +127,15 @@ def handler(event: dict, context) -> dict:
             return resp(401, {"error": "Сессия недействительна"})
         return resp(200, {"ok": True, "user": {"id": row[0], "username": row[1], "display_name": row[2], "avatar_color": row[3], "bio": row[4]}})
 
-    # POST /logout
-    if path.endswith("/logout"):
-        token = event.get("headers", {}).get("X-Session-Token") or event.get("headers", {}).get("x-session-token")
-        if token:
+    # logout
+    if action == "logout":
+        if token_header:
             conn = get_conn()
             cur = conn.cursor()
-            cur.execute("UPDATE vm_users SET session_token=NULL, is_online=FALSE, last_seen=NOW() WHERE session_token=%s", (token,))
+            cur.execute("UPDATE vm_users SET session_token=NULL, is_online=FALSE, last_seen=NOW() WHERE session_token=%s", (token_header,))
             conn.commit()
             cur.close()
             conn.close()
         return resp(200, {"ok": True})
 
-    return resp(404, {"error": "Not found"})
+    return resp(404, {"error": "Unknown action"})
