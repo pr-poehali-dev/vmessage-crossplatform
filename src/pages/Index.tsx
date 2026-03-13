@@ -652,12 +652,15 @@ export default function Index() {
     settings: <SettingsSection />,
   };
 
+  const totalUnread = chats.reduce((s, c) => s + (c.unread || 0), 0);
+  const isChatOpen = activeTab === "chats" && openChat;
+
   return (
-    <div className="h-screen flex overflow-hidden bg-background font-golos">
+    <div className="h-screen flex flex-col md:flex-row overflow-hidden bg-background font-golos">
       {showNewChat && <NewChatModal onClose={() => setShowNewChat(false)} onCreated={handleNewChatCreated} />}
 
-      {/* Nav */}
-      <nav className="vm-glass border-r w-16 flex flex-col items-center py-4 gap-1 z-10 flex-shrink-0">
+      {/* Desktop Nav (left sidebar) */}
+      <nav className="hidden md:flex vm-glass border-r w-16 flex-col items-center py-4 gap-1 z-10 flex-shrink-0">
         <div className="w-10 h-10 rounded-2xl vm-gradient-bg flex items-center justify-center mb-3 shadow-lg shadow-violet-500/30 animate-float">
           <span className="text-white font-black text-lg">V</span>
         </div>
@@ -668,9 +671,9 @@ export default function Index() {
               activeTab === item.id ? "vm-gradient-bg text-white shadow-lg shadow-violet-500/30 scale-105" : "text-muted-foreground hover:bg-violet-50 dark:hover:bg-violet-900/30 hover:text-violet-500"
             }`}>
             <Icon name={item.icon as AnyIcon} size={19} />
-            {item.id === "chats" && chats.reduce((s, c) => s + (c.unread || 0), 0) > 0 && (
+            {item.id === "chats" && totalUnread > 0 && (
               <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-pink-500 rounded-full text-[9px] text-white flex items-center justify-center font-bold">
-                {Math.min(chats.reduce((s, c) => s + (c.unread || 0), 0), 9)}
+                {Math.min(totalUnread, 9)}
               </span>
             )}
           </button>
@@ -682,40 +685,72 @@ export default function Index() {
         </button>
       </nav>
 
-      {/* Left Panel */}
-      <div className={`w-80 vm-glass border-r flex-shrink-0 ${openChat && activeTab === "chats" ? "hidden md:flex" : "flex"} flex-col`}>
-        {leftPanel[activeTab]}
+      {/* Main content area */}
+      <div className="flex-1 flex overflow-hidden min-h-0">
+        {/* Left Panel */}
+        <div className={`vm-glass border-r flex-shrink-0 flex flex-col
+          w-full md:w-80
+          ${isChatOpen ? "hidden md:flex" : "flex"}
+        `}>
+          {leftPanel[activeTab]}
+        </div>
+
+        {/* Right Panel */}
+        <div className={`flex-1 flex-col min-w-0
+          ${isChatOpen ? "flex" : "hidden md:flex"}
+        `}>
+          {activeTab === "chats" && openChat ? (
+            <ChatView chat={openChat} me={me} onBack={() => setOpenChat(null)} />
+          ) : activeTab === "chats" ? (
+            <div className="flex-1 vm-chat-bg flex flex-col items-center justify-center text-center p-8 animate-fade-in">
+              <div className="w-24 h-24 rounded-3xl vm-gradient-bg flex items-center justify-center mb-6 shadow-2xl shadow-violet-500/30 animate-float">
+                <span className="text-white font-black text-5xl">V</span>
+              </div>
+              <h2 className="text-2xl font-bold mb-2 vm-gradient-text">Добро пожаловать, {me.display_name.split(" ")[0]}!</h2>
+              <p className="text-muted-foreground text-sm max-w-xs leading-relaxed">
+                Выберите чат или нажмите + чтобы начать новую беседу
+              </p>
+              <div className="mt-6 flex items-center gap-2 px-4 py-2 rounded-full bg-black/5 dark:bg-white/5">
+                <Icon name="Lock" size={14} className="text-emerald-500" />
+                <span className="text-xs text-muted-foreground">End-to-End Encryption</span>
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 vm-chat-bg flex items-center justify-center animate-fade-in">
+              <div className="text-center">
+                <div className="w-16 h-16 rounded-3xl vm-gradient-bg flex items-center justify-center mx-auto mb-4 shadow-xl shadow-violet-500/20">
+                  <Icon name={(activeNav?.icon ?? "Circle") as AnyIcon} size={28} className="text-white" />
+                </div>
+                <h3 className="font-bold text-lg vm-gradient-text">{activeNav?.label}</h3>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Right Panel */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {activeTab === "chats" && openChat ? (
-          <ChatView chat={openChat} me={me} onBack={() => setOpenChat(null)} />
-        ) : activeTab === "chats" ? (
-          <div className="flex-1 vm-chat-bg flex flex-col items-center justify-center text-center p-8 animate-fade-in">
-            <div className="w-24 h-24 rounded-3xl vm-gradient-bg flex items-center justify-center mb-6 shadow-2xl shadow-violet-500/30 animate-float">
-              <span className="text-white font-black text-5xl">V</span>
-            </div>
-            <h2 className="text-2xl font-bold mb-2 vm-gradient-text">Добро пожаловать, {me.display_name.split(" ")[0]}!</h2>
-            <p className="text-muted-foreground text-sm max-w-xs leading-relaxed">
-              Выберите чат или нажмите + чтобы начать новую беседу
-            </p>
-            <div className="mt-6 flex items-center gap-2 px-4 py-2 rounded-full bg-black/5 dark:bg-white/5">
-              <Icon name="Lock" size={14} className="text-emerald-500" />
-              <span className="text-xs text-muted-foreground">End-to-End Encryption</span>
-            </div>
-          </div>
-        ) : (
-          <div className="flex-1 vm-chat-bg flex items-center justify-center animate-fade-in">
-            <div className="text-center">
-              <div className="w-16 h-16 rounded-3xl vm-gradient-bg flex items-center justify-center mx-auto mb-4 shadow-xl shadow-violet-500/20">
-                <Icon name={(activeNav?.icon ?? "Circle") as AnyIcon} size={28} className="text-white" />
-              </div>
-              <h3 className="font-bold text-lg vm-gradient-text">{activeNav?.label}</h3>
-            </div>
-          </div>
-        )}
-      </div>
+      {/* Mobile Bottom Nav */}
+      <nav className="md:hidden flex-shrink-0 vm-glass border-t flex items-center justify-around px-2 py-2 z-10">
+        {navItems.map(item => (
+          <button key={item.id}
+            onClick={() => { setActiveTab(item.id); if (item.id !== "chats") setOpenChat(null); }}
+            className={`relative flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-xl transition-all duration-200 ${
+              activeTab === item.id ? "vm-gradient-bg text-white shadow-lg shadow-violet-500/30" : "text-muted-foreground"
+            }`}>
+            <Icon name={item.icon as AnyIcon} size={20} />
+            <span className="text-[10px] font-medium">{item.label}</span>
+            {item.id === "chats" && totalUnread > 0 && (
+              <span className="absolute -top-0.5 right-1 w-4 h-4 bg-pink-500 rounded-full text-[9px] text-white flex items-center justify-center font-bold">
+                {Math.min(totalUnread, 9)}
+              </span>
+            )}
+          </button>
+        ))}
+        <button onClick={() => document.documentElement.classList.toggle("dark")}
+          className="flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-xl text-muted-foreground">
+          <Icon name="Sun" size={20} />
+          <span className="text-[10px] font-medium">Тема</span>
+        </button>
+      </nav>
     </div>
   );
 }
