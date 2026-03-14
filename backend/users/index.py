@@ -7,7 +7,7 @@ def handler(request):
     try:
         # 2. Пересылаем эти данные на ваш хостинг SpaceWeb
         # Замените URL на адрес вашего файла handler.php
-        url = "https://xn-----spaceweb-xijcy6aq2jtabp1s.ru"
+        url = "https://vh402-fm.sweb.ru/files/public_html/API/index.php"
         
         response = requests.post(url, json=data, timeout=30)
         
