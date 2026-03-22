@@ -8,6 +8,94 @@ type AnyIcon = any;
 
 const EMOJI_LIST = ["😀","😂","😍","🥰","😎","🤔","😢","😡","👍","👎","❤️","🔥","🎉","✅","💯","🙏","😊","🤣","😅","😭","🥳","😴","🤯","👀","💪","🚀","⭐","🌟","💎","🎵","🍕","🍔","🍺","☕","🌈","🌺","🦋","🐱","🐶","🎮"];
 
+interface VoiceMessageProps {
+  mediaUrl: string;
+  dur: number;
+  time: string;
+  isOut: boolean;
+  status?: string;
+}
+const VoiceMessage = ({ mediaUrl, dur, time, isOut, status }: VoiceMessageProps) => {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(dur);
+
+  const toggle = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (playing) {
+      audio.pause();
+      setPlaying(false);
+    } else {
+      audio.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+    }
+  };
+
+  const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const ratio = (e.clientX - rect.left) / rect.width;
+    audio.currentTime = ratio * (audio.duration || 0);
+  };
+
+  const fmt = (s: number) => {
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60);
+    return `${m}:${sec.toString().padStart(2, "0")}`;
+  };
+
+  return (
+    <div className={`flex items-center gap-2 px-3 py-2.5 rounded-2xl max-w-[260px] w-[220px] ${isOut ? "vm-msg-out" : "vm-msg-in"}`}>
+      <audio
+        ref={audioRef}
+        src={mediaUrl}
+        preload="metadata"
+        onLoadedMetadata={e => setDuration(Math.round(e.currentTarget.duration) || dur)}
+        onTimeUpdate={e => {
+          const a = e.currentTarget;
+          setCurrentTime(a.currentTime);
+          setProgress((a.currentTime / (a.duration || 1)) * 100);
+        }}
+        onEnded={() => {
+          setPlaying(false);
+          setProgress(0);
+          setCurrentTime(0);
+          if (audioRef.current) audioRef.current.currentTime = 0;
+        }}
+        onPause={() => setPlaying(false)}
+        onPlay={() => setPlaying(true)}
+      />
+      <button
+        className="w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center vm-gradient-bg text-white"
+        onClick={toggle}
+      >
+        <Icon name={playing ? "Pause" : "Play"} size={14} />
+      </button>
+      <div className="flex-1 min-w-0">
+        <div
+          className="relative h-1.5 bg-white/20 rounded-full overflow-hidden cursor-pointer"
+          onClick={handleSeek}
+        >
+          <div className="h-full bg-white/70 rounded-full" style={{ width: `${progress}%` }} />
+        </div>
+        <div className={`text-[10px] mt-1 flex items-center justify-between ${isOut ? "text-white/60" : "text-muted-foreground"}`}>
+          <span>{playing ? fmt(currentTime) : (duration ? `${duration}с` : "голосовое")}</span>
+          <span className="flex items-center gap-0.5">
+            {time}
+            {isOut && (status === "read"
+              ? <Icon name="CheckCheck" size={9} className="text-cyan-300" />
+              : <Icon name="CheckCheck" size={9} />
+            )}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const navItems = [
   { id: "chats", label: "Чаты", icon: "MessageCircle" },
   { id: "contacts", label: "Контакты", icon: "Users" },
@@ -1650,9 +1738,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
   const [showChatMenu, setShowChatMenu] = useState(false);
   const [recording, setRecording] = useState(false);
   const [showVideoNote, setShowVideoNote] = useState(false);
-  const [playingVoiceId, setPlayingVoiceId] = useState<number | null>(null);
-  const [voiceProgress, setVoiceProgress] = useState<Record<number, number>>({});
-  const audioRefs = useRef<Record<number, HTMLAudioElement | null>>({});
+
   const [showCall, setShowCall] = useState<"audio" | "video" | null>(null);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
@@ -1861,66 +1947,26 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
 
     if (isVoice) {
       const dur = m.text?.match(/(\d+)с/) ? parseInt(m.text.match(/(\d+)с/)![1]) : 0;
-      const isPlaying = playingVoiceId === m.id;
-      const progress = voiceProgress[m.id] ?? 0;
-      const toggleVoice = () => {
-        const audio = audioRefs.current[m.id];
-        if (!audio) return;
-        if (isPlaying) {
-          audio.pause();
-          setPlayingVoiceId(null);
-        } else {
-          if (playingVoiceId !== null && audioRefs.current[playingVoiceId]) {
-            audioRefs.current[playingVoiceId]!.pause();
-          }
-          audio.play().catch(() => {});
-          setPlayingVoiceId(m.id);
-        }
-      };
       return (
         <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
-          <div className={`flex items-center gap-2 px-3 py-2.5 rounded-2xl max-w-[260px] w-[220px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
-            {hasMedia ? (
-              <>
-                <audio
-                  ref={el => { audioRefs.current[m.id] = el; }}
-                  src={m.media_url}
-                  preload="metadata"
-                  className="hidden"
-                  onTimeUpdate={e => {
-                    const a = e.currentTarget;
-                    setVoiceProgress(p => ({ ...p, [m.id]: (a.currentTime / (a.duration || 1)) * 100 }));
-                  }}
-                  onEnded={() => {
-                    setPlayingVoiceId(null);
-                    setVoiceProgress(p => ({ ...p, [m.id]: 0 }));
-                  }}
-                />
-                <button
-                  className="w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center vm-gradient-bg text-white"
-                  onClick={toggleVoice}
-                >
-                  <Icon name={isPlaying ? "Pause" : "Play"} size={14} />
-                </button>
-                <div className="flex-1 min-w-0">
-                  <div className="relative h-1 bg-white/20 rounded-full overflow-hidden">
-                    <div className="h-full bg-white/70 rounded-full transition-all" style={{ width: `${progress}%` }} />
-                  </div>
-                  <div className={`text-[10px] mt-1 flex items-center justify-between ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
-                    <span>{dur ? `${dur}с` : "голосовое"}</span>
-                    <span className="flex items-center gap-0.5">{m.time} {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={9} className="text-cyan-300" /> : <Icon name="CheckCheck" size={9} />)}</span>
-                  </div>
-                </div>
-              </>
-            ) : (
+          {hasMedia ? (
+            <VoiceMessage
+              mediaUrl={m.media_url!}
+              dur={dur}
+              time={m.time}
+              isOut={!!m.out}
+              status={m.status}
+            />
+          ) : (
+            <div className={`flex items-center gap-2 px-3 py-2.5 rounded-2xl max-w-[260px] w-[220px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
               <div className="flex items-center gap-0.5 h-5 flex-1">
                 {[...Array(12)].map((_, i) => (
                   <div key={i} className={`w-1 rounded-full ${m.out ? "bg-white/60" : "bg-violet-300"}`}
                     style={{ height: `${30 + Math.sin(i * 1.3) * 50}%` }} />
                 ))}
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       );
     }
