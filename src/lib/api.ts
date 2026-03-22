@@ -116,8 +116,8 @@ export const chatsApi = {
   send: (chat_id: number, text: string) =>
     call(CHATS_URL, "send", "POST", { chat_id, text }),
 
-  sendMedia: (chat_id: number, data: string, mime_type: string, msg_type: string, text: string) =>
-    call(CHATS_URL, "send_media", "POST", { chat_id, data, mime_type, msg_type, text }),
+  sendMedia: (chat_id: number, data: string, mime_type: string, msg_type: string, text: string, filename = "") =>
+    call(CHATS_URL, "send_media", "POST", { chat_id, data, mime_type, msg_type, text, filename }),
 
   sendLocation: (chat_id: number, lat: number, lon: number, address: string) =>
     call(CHATS_URL, "send_location", "POST", { chat_id, lat, lon, address }),

@@ -521,12 +521,26 @@ function UserProfileModal({ user: initialUser, onClose, onStartChat, currentUser
   );
 }
 
-// ─── WebRTC Call Modal (caller side) ──────────────────────────────────────────
+// ─── WebRTC helpers ────────────────────────────────────────────────────────────
 const ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
+  { urls: "stun:stun3.l.google.com:19302" },
 ];
 
+async function getMedia(isVideo: boolean): Promise<MediaStream> {
+  try {
+    return await navigator.mediaDevices.getUserMedia(
+      isVideo ? { video: true, audio: true } : { audio: true }
+    );
+  } catch {
+    try { return await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch { return new MediaStream(); }
+  }
+}
+
+// ─── WebRTC Call Modal (caller side) ──────────────────────────────────────────
 function CallModal({ chat, calleeId, type, onClose }: {
   chat: Chat; calleeId: number; type: "audio" | "video"; onClose: () => void;
 }) {
@@ -543,138 +557,140 @@ function CallModal({ chat, calleeId, type, onClose }: {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const callIdRef = useRef<number | null>(null);
   const iceSentRef = useRef<Set<string>>(new Set());
-  const iceReceivedRef = useRef<Set<string>>(new Set());
+  const iceRcvRef = useRef<Set<string>>(new Set());
+  const connectedRef = useRef(false);
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
-  const cleanup = useCallback(() => {
-    if (timerRef.current) clearInterval(timerRef.current);
-    if (pollRef.current) clearInterval(pollRef.current);
+  const stopAll = useCallback((endOnServer = false) => {
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     streamRef.current?.getTracks().forEach(t => t.stop());
     pcRef.current?.close();
+    if (endOnServer && callIdRef.current) callsApi.end(callIdRef.current);
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
+    let alive = true;
+
     const run = async () => {
-      // 1. Получаем медиапоток
-      let stream: MediaStream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia(
-          type === "video" ? { video: true, audio: true } : { audio: true }
-        );
-      } catch {
-        // Если нет камеры — пробуем только аудио
-        try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-        catch { stream = new MediaStream(); }
-      }
-      if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+      const stream = await getMedia(type === "video");
+      if (!alive) { stream.getTracks().forEach(t => t.stop()); return; }
       streamRef.current = stream;
       if (localVideoRef.current && type === "video") {
         localVideoRef.current.srcObject = stream;
         localVideoRef.current.play().catch(() => {});
       }
 
-      // 2. Инициируем звонок
       const initRes = await callsApi.initiate(calleeId, type);
-      if (!initRes.ok || cancelled) { cleanup(); onClose(); return; }
+      if (!initRes.ok || !alive) { stopAll(); onClose(); return; }
       callIdRef.current = initRes.call_id;
+      console.log("[CALL] initiated", callIdRef.current);
 
-      // 3. Создаём PeerConnection
       const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
       pcRef.current = pc;
       stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
       pc.ontrack = e => {
-        if (!e.streams[0]) return;
+        console.log("[CALL] got remote track", e.track.kind);
+        const remoteStream = e.streams[0] || new MediaStream([e.track]);
         if (type === "video" && remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = e.streams[0];
+          remoteVideoRef.current.srcObject = remoteStream;
           remoteVideoRef.current.play().catch(() => {});
         } else if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = e.streams[0];
+          remoteAudioRef.current.srcObject = remoteStream;
           remoteAudioRef.current.play().catch(() => {});
         }
       };
 
-      // Собираем ICE кандидаты и отправляем через polling
-      pc.onicecandidate = e => {
-        if (e.candidate && callIdRef.current) {
-          const cStr = JSON.stringify(e.candidate);
-          if (!iceSentRef.current.has(cStr)) {
-            iceSentRef.current.add(cStr);
-            callsApi.addIce(callIdRef.current, cStr, "caller");
-          }
+      pc.onconnectionstatechange = () => {
+        console.log("[CALL] connection state:", pc.connectionState);
+        if (pc.connectionState === "connected" && !connectedRef.current) {
+          connectedRef.current = true;
+          setStatus("connected");
+          timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
+        }
+        if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+          if (alive) { setStatus("ended"); stopAll(true); setTimeout(onClose, 1000); }
         }
       };
 
-      // 4. Создаём SDP offer
-      const offer = await pc.createOffer();
+      pc.onicecandidate = e => {
+        if (!e.candidate || !callIdRef.current) return;
+        const cStr = JSON.stringify(e.candidate.toJSON());
+        if (!iceSentRef.current.has(cStr)) {
+          iceSentRef.current.add(cStr);
+          console.log("[CALL] sending ICE", e.candidate.type);
+          callsApi.addIce(callIdRef.current, cStr, "caller");
+        }
+      };
+
+      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: type === "video" });
       await pc.setLocalDescription(offer);
-      await callsApi.sendOffer(callIdRef.current, JSON.stringify(offer));
+      await callsApi.sendOffer(callIdRef.current, JSON.stringify(pc.localDescription));
+      console.log("[CALL] offer sent");
 
-      // 5. Polling — ждём answer и ICE от callee
+      // Poll для answer + ICE от callee
       pollRef.current = setInterval(async () => {
-        if (!callIdRef.current || cancelled) return;
-        const statusRes = await callsApi.getStatus(callIdRef.current);
-        if (!statusRes.ok) return;
+        if (!callIdRef.current || !alive) return;
+        const st = await callsApi.getStatus(callIdRef.current);
+        if (!st.ok) return;
+        console.log("[CALL] poll status:", st.status, "has_answer:", st.has_answer);
 
-        if (statusRes.status === "rejected" || statusRes.status === "ended") {
-          if (!cancelled) { setStatus(statusRes.status === "rejected" ? "rejected" : "ended"); cleanup(); setTimeout(onClose, 1500); }
+        if (st.status === "rejected" || st.status === "ended") {
+          if (alive) {
+            setStatus(st.status === "rejected" ? "rejected" : "ended");
+            stopAll();
+            setTimeout(onClose, 1200);
+          }
           return;
         }
 
-        if (statusRes.status === "accepted" && statusRes.has_answer && pcRef.current?.remoteDescription === null) {
-          const ansRes = await callsApi.getAnswer(callIdRef.current);
-          if (ansRes.ok && ansRes.answer) {
-            await pcRef.current?.setRemoteDescription(new RTCSessionDescription(JSON.parse(ansRes.answer)));
-            setStatus("connected");
-            timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
+        if (st.status === "accepted" && st.has_answer && !pc.remoteDescription) {
+          const ansR = await callsApi.getAnswer(callIdRef.current);
+          if (ansR.ok && ansR.answer) {
+            try {
+              await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(ansR.answer)));
+              console.log("[CALL] remote description set");
+              if (!connectedRef.current) {
+                setStatus("connected");
+                connectedRef.current = true;
+                timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
+              }
+            } catch (e) { console.error("[CALL] setRemoteDescription failed", e); }
           }
         }
 
-        // Получаем ICE от callee (только после установки remoteDescription)
-        if (statusRes.status === "accepted" && pcRef.current?.remoteDescription) {
-          const iceRes = await callsApi.getIce(callIdRef.current, "caller");
-          if (iceRes.ok && iceRes.candidates?.length) {
-            for (const c of iceRes.candidates) {
-              try {
-                const cand = typeof c === "string" ? JSON.parse(c) : c;
-                const key = JSON.stringify(cand);
-                if (!iceReceivedRef.current.has(key)) {
-                  iceReceivedRef.current.add(key);
-                  await pcRef.current?.addIceCandidate(new RTCIceCandidate(cand));
-                }
-              } catch (_e) { void _e; }
+        // Получаем ICE кандидаты от callee
+        if (st.status === "accepted") {
+          const iceR = await callsApi.getIce(callIdRef.current, "caller");
+          if (iceR.ok && iceR.candidates?.length) {
+            for (const c of iceR.candidates) {
+              const cand = typeof c === "string" ? JSON.parse(c) : c;
+              const key = JSON.stringify(cand);
+              if (!iceRcvRef.current.has(key)) {
+                iceRcvRef.current.add(key);
+                try {
+                  if (pc.remoteDescription) {
+                    await pc.addIceCandidate(new RTCIceCandidate(cand));
+                    console.log("[CALL] added callee ICE candidate");
+                  }
+                } catch (e) { console.warn("[CALL] ICE add failed", e); }
+              }
             }
           }
         }
-      }, 2000);
+      }, 1000);
     };
 
     run();
-    return () => {
-      cancelled = true;
-      // При размонтировании завершаем звонок на сервере
-      if (callIdRef.current) callsApi.end(callIdRef.current);
-      cleanup();
-    };
-  }, [calleeId, type, cleanup, onClose]);
+    return () => { alive = false; stopAll(true); };
+  }, [calleeId, type, stopAll, onClose]);
 
   const endCall = async () => {
-    if (callIdRef.current) await callsApi.end(callIdRef.current);
-    cleanup();
+    stopAll(true);
     setStatus("ended");
     setTimeout(onClose, 800);
-  };
-
-  const toggleMute = () => {
-    streamRef.current?.getAudioTracks().forEach(t => { t.enabled = !t.enabled; });
-    setMuted(v => !v);
-  };
-
-  const toggleCam = () => {
-    streamRef.current?.getVideoTracks().forEach(t => { t.enabled = !t.enabled; });
-    setCamOff(v => !v);
   };
 
   return (
@@ -689,31 +705,27 @@ function CallModal({ chat, calleeId, type, onClose }: {
         </div>
       )}
       {type === "audio" && <audio ref={remoteAudioRef} autoPlay playsInline />}
-
       <div className="relative flex flex-col items-center mt-12 z-10">
         <Avatar label={chat.name} color={chat.avatar_color} size={100} src={chat.avatar_url || undefined} />
         <h2 className="text-white font-bold text-2xl mt-4">{chat.name}</h2>
         <p className="text-white/70 text-sm mt-1">
-          {status === "calling" ? "Вызов..." :
-           status === "connected" ? fmt(seconds) :
-           status === "rejected" ? "Недоступен" : "Звонок завершён"}
+          {status === "calling" ? "Вызов..." : status === "connected" ? fmt(seconds) : status === "rejected" ? "Недоступен" : "Звонок завершён"}
         </p>
         {status === "calling" && (
           <div className="flex gap-1 mt-3">
-            {[0,1,2].map(i => (
-              <div key={i} className="w-2 h-2 bg-white/60 rounded-full animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
-            ))}
+            {[0,1,2].map(i => <div key={i} className="w-2 h-2 bg-white/60 rounded-full animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />)}
           </div>
         )}
       </div>
-
       <div className="relative flex items-center gap-6 z-10 mb-8">
         {type === "video" && (
-          <button onClick={toggleCam} className={`w-14 h-14 rounded-full ${camOff ? "bg-red-500" : "bg-white/20"} text-white flex items-center justify-center hover:opacity-90 transition-colors`}>
+          <button onClick={() => { streamRef.current?.getVideoTracks().forEach(t => { t.enabled = !t.enabled; }); setCamOff(v => !v); }}
+            className={`w-14 h-14 rounded-full ${camOff ? "bg-red-500" : "bg-white/20"} text-white flex items-center justify-center hover:opacity-90 transition-colors`}>
             <Icon name={camOff ? "VideoOff" : "Video"} size={22} />
           </button>
         )}
-        <button onClick={toggleMute} className={`w-14 h-14 rounded-full ${muted ? "bg-red-500" : "bg-white/20"} text-white flex items-center justify-center hover:opacity-90 transition-colors`}>
+        <button onClick={() => { streamRef.current?.getAudioTracks().forEach(t => { t.enabled = !t.enabled; }); setMuted(v => !v); }}
+          className={`w-14 h-14 rounded-full ${muted ? "bg-red-500" : "bg-white/20"} text-white flex items-center justify-center hover:opacity-90 transition-colors`}>
           <Icon name={muted ? "MicOff" : "Mic"} size={22} />
         </button>
         <button onClick={endCall} className="w-16 h-16 rounded-full bg-red-500 text-white flex items-center justify-center shadow-2xl shadow-red-500/50 hover:bg-red-600 transition-colors">
@@ -776,113 +788,105 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
   const streamRef = useRef<MediaStream | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const iceSentRef = useRef<Set<string>>(new Set());
-  const iceReceivedRef = useRef<Set<string>>(new Set());
+  const iceRcvRef = useRef<Set<string>>(new Set());
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
-  const cleanup = useCallback(() => {
-    if (timerRef.current) clearInterval(timerRef.current);
-    if (pollRef.current) clearInterval(pollRef.current);
+  const stopAll = useCallback((endOnServer = false) => {
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     streamRef.current?.getTracks().forEach(t => t.stop());
     pcRef.current?.close();
-  }, []);
+    if (endOnServer) callsApi.end(callId);
+  }, [callId]);
 
   useEffect(() => {
-    let cancelled = false;
+    let alive = true;
+
     const run = async () => {
-      // 1. Получаем медиапоток
-      let stream: MediaStream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia(
-          callType === "video" ? { video: true, audio: true } : { audio: true }
-        );
-      } catch {
-        try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-        catch { stream = new MediaStream(); }
-      }
-      if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+      const stream = await getMedia(callType === "video");
+      if (!alive) { stream.getTracks().forEach(t => t.stop()); return; }
       streamRef.current = stream;
       if (localVideoRef.current && callType === "video") {
         localVideoRef.current.srcObject = stream;
         localVideoRef.current.play().catch(() => {});
       }
 
-      // 2. Получаем offer от звонящего
       const offerRes = await callsApi.getOffer(callId);
-      if (!offerRes.ok || !offerRes.offer || cancelled) { cleanup(); onClose(); return; }
+      if (!offerRes.ok || !offerRes.offer || !alive) { stopAll(); onClose(); return; }
+      console.log("[CALLEE] got offer");
 
-      // 3. Создаём PeerConnection
       const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
       pcRef.current = pc;
       stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
       pc.ontrack = e => {
-        if (!e.streams[0]) return;
+        console.log("[CALLEE] got remote track", e.track.kind);
+        const remoteStream = e.streams[0] || new MediaStream([e.track]);
         if (callType === "video" && remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = e.streams[0];
+          remoteVideoRef.current.srcObject = remoteStream;
           remoteVideoRef.current.play().catch(() => {});
         } else if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = e.streams[0];
+          remoteAudioRef.current.srcObject = remoteStream;
           remoteAudioRef.current.play().catch(() => {});
         }
       };
 
-      pc.onicecandidate = e => {
-        if (e.candidate) {
-          const cStr = JSON.stringify(e.candidate);
-          if (!iceSentRef.current.has(cStr)) {
-            iceSentRef.current.add(cStr);
-            callsApi.addIce(callId, cStr, "callee");
-          }
+      pc.onconnectionstatechange = () => {
+        console.log("[CALLEE] connection state:", pc.connectionState);
+        if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+          if (alive) { stopAll(true); onClose(); }
         }
       };
 
-      // 4. Устанавливаем offer и создаём answer
+      pc.onicecandidate = e => {
+        if (!e.candidate) return;
+        const cStr = JSON.stringify(e.candidate.toJSON());
+        if (!iceSentRef.current.has(cStr)) {
+          iceSentRef.current.add(cStr);
+          console.log("[CALLEE] sending ICE", e.candidate.type);
+          callsApi.addIce(callId, cStr, "callee");
+        }
+      };
+
       await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(offerRes.offer)));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      // accept обновляет статус до 'accepted' и сохраняет answer
-      await callsApi.accept(callId, JSON.stringify(answer));
+      await callsApi.accept(callId, JSON.stringify(pc.localDescription));
+      console.log("[CALLEE] answer sent via accept");
 
       timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
 
-      // 5. Polling — получаем ICE от caller
       pollRef.current = setInterval(async () => {
-        if (cancelled) return;
-        const statusRes = await callsApi.getStatus(callId);
-        if (statusRes.status === "ended" || statusRes.status === "rejected") {
-          cleanup(); onClose(); return;
+        if (!alive) return;
+        const st = await callsApi.getStatus(callId);
+        if (st.status === "ended" || st.status === "rejected") {
+          if (alive) { stopAll(); onClose(); }
+          return;
         }
-
-        const iceRes = await callsApi.getIce(callId, "callee");
-        if (iceRes.ok && iceRes.candidates?.length && pcRef.current?.remoteDescription) {
-          for (const c of iceRes.candidates) {
-            try {
-              const cand = typeof c === "string" ? JSON.parse(c) : c;
-              const key = JSON.stringify(cand);
-              if (!iceReceivedRef.current.has(key)) {
-                iceReceivedRef.current.add(key);
-                await pcRef.current.addIceCandidate(new RTCIceCandidate(cand));
-              }
-            } catch (_e) { void _e; }
+        // Получаем ICE кандидаты от caller
+        const iceR = await callsApi.getIce(callId, "callee");
+        if (iceR.ok && iceR.candidates?.length) {
+          for (const c of iceR.candidates) {
+            const cand = typeof c === "string" ? JSON.parse(c) : c;
+            const key = JSON.stringify(cand);
+            if (!iceRcvRef.current.has(key)) {
+              iceRcvRef.current.add(key);
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate(cand));
+                console.log("[CALLEE] added caller ICE candidate");
+              } catch (e) { console.warn("[CALLEE] ICE add failed", e); }
+            }
           }
         }
-      }, 2000);
+      }, 1000);
     };
 
     run();
-    return () => {
-      cancelled = true;
-      callsApi.end(callId);
-      cleanup();
-    };
-  }, [callId, callType, cleanup, onClose]);
+    return () => { alive = false; stopAll(true); };
+  }, [callId, callType, stopAll, onClose]);
 
-  const endCall = async () => {
-    await callsApi.end(callId);
-    cleanup();
-    onClose();
-  };
+  const endCall = () => { stopAll(true); onClose(); };
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col items-center justify-between bg-gradient-to-b from-violet-900 to-indigo-900 p-8 animate-fade-in">
@@ -895,13 +899,11 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
         </div>
       )}
       {callType === "audio" && <audio ref={remoteAudioRef} autoPlay playsInline />}
-
       <div className="relative flex flex-col items-center mt-12 z-10">
         <Avatar label={callerName} color={callerColor} size={100} src={callerAvatar} />
         <h2 className="text-white font-bold text-2xl mt-4">{callerName}</h2>
         <p className="text-white/70 text-sm mt-1">{fmt(seconds)}</p>
       </div>
-
       <div className="relative flex items-center gap-6 z-10 mb-8">
         <button onClick={() => { streamRef.current?.getAudioTracks().forEach(t => { t.enabled = !t.enabled; }); setMuted(v => !v); }}
           className={`w-14 h-14 rounded-full ${muted ? "bg-red-500" : "bg-white/20"} text-white flex items-center justify-center`}>
@@ -1727,41 +1729,55 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
 
   const sendVoice = async (blob: Blob, duration: number) => {
     setRecording(false);
-    if (!blob.size) return;
+    if (!blob || blob.size < 100) { console.warn("[VOICE] empty blob", blob?.size); return; }
     const mimeType = blob.type || "audio/webm";
-    const base64 = await blobToBase64(blob);
-    const res = await chatsApi.sendMedia(chat.id, base64, mimeType, "voice", `🎤 Голосовое ${duration}с`);
-    if (res.ok) setMessages(m => [...m, {
-      ...res.message, sender_id: me.id, sender_name: me.display_name,
-      sender_color: me.avatar_color, sender_username: me.username
-    }]);
-  };
-
-  const sendVideoNote = async (blob: Blob, duration: number) => {
-    setShowVideoNote(false);
-    if (!blob.size) return;
-    const mimeType = blob.type || "video/webm";
-    const base64 = await blobToBase64(blob);
-    const res = await chatsApi.sendMedia(chat.id, base64, mimeType, "video_note", `⭕ Видеосообщение ${duration}с`);
-    if (res.ok) setMessages(m => [...m, {
-      ...res.message, sender_id: me.id, sender_name: me.display_name,
-      sender_color: me.avatar_color, sender_username: me.username
-    }]);
-  };
-
-  const sendFile = async (file: File, msgType = "file") => {
-    setShowAttachMenu(false);
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const base64 = (reader.result as string).split(",")[1];
-      const prefix = msgType === "image" ? "📷" : msgType === "video" ? "🎬" : "📎";
-      const res = await chatsApi.sendMedia(chat.id, base64, file.type, msgType, `${prefix} ${file.name}`);
+    const ext = mimeType.includes("ogg") ? "ogg" : mimeType.includes("mp4") ? "m4a" : "webm";
+    console.log("[VOICE] sending", blob.size, "bytes,", mimeType);
+    try {
+      const base64 = await blobToBase64(blob);
+      const res = await chatsApi.sendMedia(chat.id, base64, mimeType, "voice", `🎤 Голосовое ${duration}с`, `voice.${ext}`);
       if (res.ok) setMessages(m => [...m, {
         ...res.message, sender_id: me.id, sender_name: me.display_name,
         sender_color: me.avatar_color, sender_username: me.username
       }]);
-    };
-    reader.readAsDataURL(file);
+      else console.error("[VOICE] send failed", res);
+    } catch (e) { console.error("[VOICE] error", e); }
+  };
+
+  const sendVideoNote = async (blob: Blob, duration: number) => {
+    setShowVideoNote(false);
+    if (!blob || blob.size < 100) { console.warn("[VIDEO_NOTE] empty blob", blob?.size); return; }
+    const mimeType = blob.type || "video/webm";
+    const ext = mimeType.includes("mp4") ? "mp4" : "webm";
+    console.log("[VIDEO_NOTE] sending", blob.size, "bytes,", mimeType);
+    try {
+      const base64 = await blobToBase64(blob);
+      const res = await chatsApi.sendMedia(chat.id, base64, mimeType, "video_note", `⭕ Видеосообщение ${duration}с`, `note.${ext}`);
+      if (res.ok) setMessages(m => [...m, {
+        ...res.message, sender_id: me.id, sender_name: me.display_name,
+        sender_color: me.avatar_color, sender_username: me.username
+      }]);
+      else console.error("[VIDEO_NOTE] send failed", res);
+    } catch (e) { console.error("[VIDEO_NOTE] error", e); }
+  };
+
+  const sendFile = async (file: File, msgType = "file") => {
+    setShowAttachMenu(false);
+    // Автоопределение типа по MIME
+    let type = msgType;
+    if (msgType === "file") {
+      if (file.type.startsWith("image/")) type = "image";
+      else if (file.type.startsWith("video/")) type = "video";
+      else if (file.type.startsWith("audio/")) type = "file"; // аудио-файлы как file
+    }
+    const prefix = type === "image" ? "📷" : type === "video" ? "🎬" : type === "audio" ? "🎵" : "📎";
+    const mimeType = file.type || "application/octet-stream";
+    const base64 = await blobToBase64(file);
+    const res = await chatsApi.sendMedia(chat.id, base64, mimeType, type, `${prefix} ${file.name}`, file.name);
+    if (res.ok) setMessages(m => [...m, {
+      ...res.message, sender_id: me.id, sender_name: me.display_name,
+      sender_color: me.avatar_color, sender_username: me.username
+    }]);
   };
 
   const sendLocation = async () => {

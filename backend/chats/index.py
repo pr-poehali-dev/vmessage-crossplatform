@@ -33,9 +33,36 @@ def get_user_by_token(cur, token: str):
     return cur.fetchone()
 
 
-def upload_to_s3(data_b64: str, mime_type: str, folder: str) -> str:
+MIME_EXT = {
+    "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/ogg": "ogg",
+    "audio/wav": "wav", "audio/x-wav": "wav", "audio/webm": "webm",
+    "audio/mp4": "m4a", "audio/aac": "aac", "audio/flac": "flac",
+    "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
+    "video/x-msvideo": "avi", "video/3gpp": "3gp",
+    "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif",
+    "image/webp": "webp", "image/heic": "heic",
+    "application/pdf": "pdf",
+    "application/zip": "zip", "application/x-zip-compressed": "zip",
+    "application/vnd.android.package-archive": "apk",
+    "application/x-apk": "apk",
+    "application/octet-stream": "bin",
+    "application/msword": "doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "text/plain": "txt", "text/csv": "csv",
+}
+
+def upload_to_s3(data_b64: str, mime_type: str, folder: str, filename: str = "") -> str:
     data = base64.b64decode(data_b64)
-    ext = mime_type.split("/")[-1].replace("webm", "webm").replace("jpeg", "jpg").replace("quicktime", "mov")
+    # Определяем расширение
+    if filename and "." in filename:
+        ext = filename.rsplit(".", 1)[-1].lower()[:10]
+    elif mime_type in MIME_EXT:
+        ext = MIME_EXT[mime_type]
+    else:
+        raw = mime_type.split("/")[-1].split(";")[0].strip()
+        ext = raw[:10] if raw else "bin"
     key = f"{folder}/{uuid.uuid4()}.{ext}"
     s3 = boto3.client(
         "s3",
@@ -382,6 +409,7 @@ def handler(event: dict, context) -> dict:
         mime_type = body.get("mime_type", "application/octet-stream")
         msg_type = body.get("msg_type", "file")
         text = body.get("text", "")
+        filename = body.get("filename", "")
 
         if not chat_id or not data_b64:
             cur.close(); conn.close()
@@ -396,10 +424,9 @@ def handler(event: dict, context) -> dict:
         folder = folder_map.get(msg_type, "files")
 
         if msg_type == "location":
-            # Геолокация не требует S3, данные в тексте (JSON)
             media_url = None
         else:
-            media_url = upload_to_s3(data_b64, mime_type, folder)
+            media_url = upload_to_s3(data_b64, mime_type, folder, filename)
 
         cur.execute(
             f"INSERT INTO {SCHEMA}.vm_messages (chat_id, sender_id, msg_text, msg_type, msg_status, media_url) VALUES (%s, %s, %s, %s, 'sent', %s) RETURNING id, created_at",
