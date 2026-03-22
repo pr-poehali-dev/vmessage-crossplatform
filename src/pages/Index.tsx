@@ -173,52 +173,55 @@ function VoiceRecorder({ onSend, onCancel }: {
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const durRef = useRef(0);
-  const committedRef = useRef(false); // флаг — уже отправляем, не трогать
+  const isMountedRef = useRef(true);
 
   useEffect(() => {
-    let active = true;
+    isMountedRef.current = true;
     navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-      if (!active) { stream.getTracks().forEach(t => t.stop()); return; }
+      if (!isMountedRef.current) { stream.getTracks().forEach(t => t.stop()); return; }
       streamRef.current = stream;
       const mimeType = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"]
         .find(t => MediaRecorder.isTypeSupported(t)) || "";
       const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       mrRef.current = mr;
       mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
-      mr.start(100);
+      mr.start(1000);
+      console.log("[VoiceRecorder] started recording, mimeType:", mr.mimeType);
       timerRef.current = setInterval(() => {
         durRef.current += 1;
         setSeconds(durRef.current);
       }, 1000);
-    }).catch(() => { if (active) onCancel(); });
+    }).catch(() => { if (isMountedRef.current) onCancel(); });
     return () => {
-      active = false;
+      isMountedRef.current = false;
       if (timerRef.current) clearInterval(timerRef.current);
-      // Только если НЕ в процессе отправки — просто останавливаем треки
-      if (!committedRef.current) {
-        streamRef.current?.getTracks().forEach(t => t.stop());
-        if (mrRef.current?.state === "recording") {
-          mrRef.current.onstop = null; // сбрасываем чтобы не вызвать onSend
-          mrRef.current.stop();
-        }
+      // Cleanup: stop MediaRecorder and tracks if still active
+      if (mrRef.current?.state === "recording") {
+        try { mrRef.current.stop(); } catch (_) { /* ok */ }
       }
+      streamRef.current?.getTracks().forEach(t => t.stop());
     };
   }, [onCancel]);
 
-  const stop = () => {
+  const stop = async () => {
     const mr = mrRef.current;
     if (!mr || mr.state !== "recording") return;
-    committedRef.current = true;
     if (timerRef.current) clearInterval(timerRef.current);
     const dur = durRef.current;
     const mimeType = mr.mimeType || "audio/webm";
-    mr.onstop = () => {
-      streamRef.current?.getTracks().forEach(t => t.stop());
-      const blob = new Blob(chunksRef.current, { type: mimeType });
-      onSend(blob, dur);
-    };
-    try { mr.requestData(); } catch (_) { /* not all browsers support */ }
-    mr.stop();
+
+    // Promise-based stop: wait for MediaRecorder to finish
+    await new Promise<void>(resolve => {
+      mr.addEventListener("stop", resolve, { once: true });
+      mr.stop();
+    });
+    console.log("[VoiceRecorder] stopped, chunks:", chunksRef.current.length);
+
+    const blob = new Blob(chunksRef.current, { type: mimeType });
+    onSend(blob, dur);
+
+    // Stop tracks only after onSend
+    streamRef.current?.getTracks().forEach(t => t.stop());
   };
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -259,49 +262,53 @@ function VideoNoteRecorder({ onSend, onCancel }: {
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const durRef = useRef(0);
-  const committedRef = useRef(false);
+  const isMountedRef = useRef(true);
   const MAX = 60;
 
   useEffect(() => {
-    let active = true;
+    isMountedRef.current = true;
     navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true })
       .then(stream => {
-        if (!active) { stream.getTracks().forEach(t => t.stop()); return; }
+        if (!isMountedRef.current) { stream.getTracks().forEach(t => t.stop()); return; }
         streamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           videoRef.current.play().catch(() => {});
         }
         setReady(true);
+        console.log("[VideoNote] camera ready");
       })
-      .catch(() => { if (active) setError("Нет доступа к камере/микрофону"); });
+      .catch(() => { if (isMountedRef.current) setError("Нет доступа к камере/микрофону"); });
     return () => {
-      active = false;
+      isMountedRef.current = false;
       if (timerRef.current) clearInterval(timerRef.current);
-      if (!committedRef.current) {
-        streamRef.current?.getTracks().forEach(t => t.stop());
-        if (mrRef.current?.state === "recording") {
-          mrRef.current.onstop = null;
-          mrRef.current.stop();
-        }
+      // Cleanup: stop MediaRecorder and tracks
+      if (mrRef.current?.state === "recording") {
+        try { mrRef.current.stop(); } catch (_) { /* ok */ }
       }
+      streamRef.current?.getTracks().forEach(t => t.stop());
     };
   }, []);
 
-  const stopRec = useCallback(() => {
+  const stopRec = useCallback(async () => {
     const mr = mrRef.current;
     if (!mr || mr.state !== "recording") return;
-    committedRef.current = true;
     if (timerRef.current) clearInterval(timerRef.current);
     const dur = durRef.current;
     const mimeType = mr.mimeType || "video/webm";
-    mr.onstop = () => {
-      streamRef.current?.getTracks().forEach(t => t.stop());
-      const blob = new Blob(chunksRef.current, { type: mimeType });
-      onSend(blob, dur);
-    };
-    try { mr.requestData(); } catch (_) { /* ok */ }
-    mr.stop();
+
+    // Promise-based stop
+    await new Promise<void>(resolve => {
+      mr.addEventListener("stop", resolve, { once: true });
+      mr.stop();
+    });
+    console.log("[VideoNote] stopped, chunks:", chunksRef.current.length);
+
+    const blob = new Blob(chunksRef.current, { type: mimeType });
+    onSend(blob, dur);
+
+    // Stop tracks only after onSend
+    streamRef.current?.getTracks().forEach(t => t.stop());
   }, [onSend]);
 
   const startRec = () => {
@@ -315,8 +322,9 @@ function VideoNoteRecorder({ onSend, onCancel }: {
     durRef.current = 0;
     mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
     mr.onerror = () => setError("Ошибка записи");
-    mr.start(100);
+    mr.start(1000);
     setRecording(true);
+    console.log("[VideoNote] recording started, mimeType:", mr.mimeType);
     timerRef.current = setInterval(() => {
       durRef.current += 1;
       setSeconds(durRef.current);
@@ -326,7 +334,7 @@ function VideoNoteRecorder({ onSend, onCancel }: {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 animate-fade-in" onClick={onCancel}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 animate-fade-in">
       <div className="flex flex-col items-center gap-5" onClick={e => e.stopPropagation()}>
         {error ? (
           <div className="flex flex-col items-center gap-3">
@@ -540,6 +548,25 @@ async function getMedia(isVideo: boolean): Promise<MediaStream> {
   }
 }
 
+// ─── Wait for ICE gathering helper ──────────────────────────────────────────
+function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
+  return new Promise(resolve => {
+    if (pc.iceGatheringState === "complete") { resolve(); return; }
+    const check = () => {
+      if (pc.iceGatheringState === "complete") {
+        pc.removeEventListener("icegatheringstatechange", check);
+        resolve();
+      }
+    };
+    pc.addEventListener("icegatheringstatechange", check);
+    // Timeout 5s in case gathering never completes
+    setTimeout(() => {
+      pc.removeEventListener("icegatheringstatechange", check);
+      resolve();
+    }, 5000);
+  });
+}
+
 // ─── WebRTC Call Modal (caller side) ──────────────────────────────────────────
 function CallModal({ chat, calleeId, type, onClose }: {
   chat: Chat; calleeId: number; type: "audio" | "video"; onClose: () => void;
@@ -556,8 +583,6 @@ function CallModal({ chat, calleeId, type, onClose }: {
   const streamRef = useRef<MediaStream | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const callIdRef = useRef<number | null>(null);
-  const iceSentRef = useRef<Set<string>>(new Set());
-  const iceRcvRef = useRef<Set<string>>(new Set());
   const connectedRef = useRef(false);
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -591,9 +616,11 @@ function CallModal({ chat, calleeId, type, onClose }: {
       pcRef.current = pc;
       stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
+      // Handle remote tracks
+      const remoteStream = new MediaStream();
       pc.ontrack = e => {
         console.log("[CALL] got remote track", e.track.kind);
-        const remoteStream = e.streams[0] || new MediaStream([e.track]);
+        remoteStream.addTrack(e.track);
         if (type === "video" && remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = remoteStream;
           remoteVideoRef.current.play().catch(() => {});
@@ -608,29 +635,23 @@ function CallModal({ chat, calleeId, type, onClose }: {
         if (pc.connectionState === "connected" && !connectedRef.current) {
           connectedRef.current = true;
           setStatus("connected");
-          timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
+          if (!timerRef.current) timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
         }
         if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
           if (alive) { setStatus("ended"); stopAll(true); setTimeout(onClose, 1000); }
         }
       };
 
-      pc.onicecandidate = e => {
-        if (!e.candidate || !callIdRef.current) return;
-        const cStr = JSON.stringify(e.candidate.toJSON());
-        if (!iceSentRef.current.has(cStr)) {
-          iceSentRef.current.add(cStr);
-          console.log("[CALL] sending ICE", e.candidate.type);
-          callsApi.addIce(callIdRef.current, cStr, "caller");
-        }
-      };
-
+      // Create offer, wait for ICE gathering, then send full SDP with candidates
       const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: type === "video" });
       await pc.setLocalDescription(offer);
+      console.log("[CALL] waiting for ICE gathering...");
+      await waitForIceGathering(pc);
+      console.log("[CALL] ICE gathering complete, sending offer with candidates");
       await callsApi.sendOffer(callIdRef.current, JSON.stringify(pc.localDescription));
-      console.log("[CALL] offer sent");
+      console.log("[CALL] offer sent (full SDP with ICE)");
 
-      // Poll для answer + ICE от callee
+      // Poll for answer — no need for separate ICE exchange
       pollRef.current = setInterval(async () => {
         if (!callIdRef.current || !alive) return;
         const st = await callsApi.getStatus(callIdRef.current);
@@ -651,36 +672,16 @@ function CallModal({ chat, calleeId, type, onClose }: {
           if (ansR.ok && ansR.answer) {
             try {
               await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(ansR.answer)));
-              console.log("[CALL] remote description set");
+              console.log("[CALL] remote description set (full SDP with ICE)");
               if (!connectedRef.current) {
                 setStatus("connected");
                 connectedRef.current = true;
-                timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
+                if (!timerRef.current) timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
               }
             } catch (e) { console.error("[CALL] setRemoteDescription failed", e); }
           }
         }
-
-        // Получаем ICE кандидаты от callee
-        if (st.status === "accepted") {
-          const iceR = await callsApi.getIce(callIdRef.current, "caller");
-          if (iceR.ok && iceR.candidates?.length) {
-            for (const c of iceR.candidates) {
-              const cand = typeof c === "string" ? JSON.parse(c) : c;
-              const key = JSON.stringify(cand);
-              if (!iceRcvRef.current.has(key)) {
-                iceRcvRef.current.add(key);
-                try {
-                  if (pc.remoteDescription) {
-                    await pc.addIceCandidate(new RTCIceCandidate(cand));
-                    console.log("[CALL] added callee ICE candidate");
-                  }
-                } catch (e) { console.warn("[CALL] ICE add failed", e); }
-              }
-            }
-          }
-        }
-      }, 1000);
+      }, 2000);
     };
 
     run();
@@ -704,7 +705,7 @@ function CallModal({ chat, calleeId, type, onClose }: {
           </div>
         </div>
       )}
-      {type === "audio" && <audio ref={remoteAudioRef} autoPlay playsInline />}
+      {type === "audio" && <audio ref={remoteAudioRef} autoPlay />}
       <div className="relative flex flex-col items-center mt-12 z-10">
         <Avatar label={chat.name} color={chat.avatar_color} size={100} src={chat.avatar_url || undefined} />
         <h2 className="text-white font-bold text-2xl mt-4">{chat.name}</h2>
@@ -787,8 +788,7 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
-  const iceSentRef = useRef<Set<string>>(new Set());
-  const iceRcvRef = useRef<Set<string>>(new Set());
+  const connectedRef = useRef(false);
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
@@ -814,15 +814,17 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
 
       const offerRes = await callsApi.getOffer(callId);
       if (!offerRes.ok || !offerRes.offer || !alive) { stopAll(); onClose(); return; }
-      console.log("[CALLEE] got offer");
+      console.log("[CALLEE] got offer (full SDP with ICE)");
 
       const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
       pcRef.current = pc;
       stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
+      // Handle remote tracks
+      const remoteStream = new MediaStream();
       pc.ontrack = e => {
         console.log("[CALLEE] got remote track", e.track.kind);
-        const remoteStream = e.streams[0] || new MediaStream([e.track]);
+        remoteStream.addTrack(e.track);
         if (callType === "video" && remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = remoteStream;
           remoteVideoRef.current.play().catch(() => {});
@@ -834,29 +836,30 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
 
       pc.onconnectionstatechange = () => {
         console.log("[CALLEE] connection state:", pc.connectionState);
+        if (pc.connectionState === "connected" && !connectedRef.current) {
+          connectedRef.current = true;
+        }
         if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
           if (alive) { stopAll(true); onClose(); }
         }
       };
 
-      pc.onicecandidate = e => {
-        if (!e.candidate) return;
-        const cStr = JSON.stringify(e.candidate.toJSON());
-        if (!iceSentRef.current.has(cStr)) {
-          iceSentRef.current.add(cStr);
-          console.log("[CALLEE] sending ICE", e.candidate.type);
-          callsApi.addIce(callId, cStr, "callee");
-        }
-      };
-
+      // Set remote description (offer with all ICE candidates from caller)
       await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(offerRes.offer)));
+      console.log("[CALLEE] remote description set");
+
+      // Create answer, wait for ICE gathering, then send full SDP
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
+      console.log("[CALLEE] waiting for ICE gathering...");
+      await waitForIceGathering(pc);
+      console.log("[CALLEE] ICE gathering complete, sending answer with candidates");
       await callsApi.accept(callId, JSON.stringify(pc.localDescription));
-      console.log("[CALLEE] answer sent via accept");
+      console.log("[CALLEE] answer sent via accept (full SDP with ICE)");
 
       timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
 
+      // Poll only for status (end/reject) — no ICE exchange needed
       pollRef.current = setInterval(async () => {
         if (!alive) return;
         const st = await callsApi.getStatus(callId);
@@ -864,22 +867,7 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
           if (alive) { stopAll(); onClose(); }
           return;
         }
-        // Получаем ICE кандидаты от caller
-        const iceR = await callsApi.getIce(callId, "callee");
-        if (iceR.ok && iceR.candidates?.length) {
-          for (const c of iceR.candidates) {
-            const cand = typeof c === "string" ? JSON.parse(c) : c;
-            const key = JSON.stringify(cand);
-            if (!iceRcvRef.current.has(key)) {
-              iceRcvRef.current.add(key);
-              try {
-                await pc.addIceCandidate(new RTCIceCandidate(cand));
-                console.log("[CALLEE] added caller ICE candidate");
-              } catch (e) { console.warn("[CALLEE] ICE add failed", e); }
-            }
-          }
-        }
-      }, 1000);
+      }, 2000);
     };
 
     run();
@@ -898,7 +886,7 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
           </div>
         </div>
       )}
-      {callType === "audio" && <audio ref={remoteAudioRef} autoPlay playsInline />}
+      {callType === "audio" && <audio ref={remoteAudioRef} autoPlay />}
       <div className="relative flex flex-col items-center mt-12 z-10">
         <Avatar label={callerName} color={callerColor} size={100} src={callerAvatar} />
         <h2 className="text-white font-bold text-2xl mt-4">{callerName}</h2>
