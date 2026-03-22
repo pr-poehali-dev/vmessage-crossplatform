@@ -56,6 +56,7 @@ export interface Message {
   sender_color: string;
   sender_username: string;
   out: boolean;
+  media_url?: string;
 }
 
 async function call(baseUrl: string, action: string, method = "GET", body?: object, token?: string | null, extraQuery?: Record<string, string>) {
@@ -97,11 +98,17 @@ export const chatsApi = {
   createGroup: (name: string) =>
     call(CHATS_URL, "create", "POST", { type: "group", name }),
 
+  createChannel: (name: string, description: string) =>
+    call(CHATS_URL, "create", "POST", { type: "channel", name, description }),
+
   messages: (chat_id: number) =>
     call(CHATS_URL, "messages", "GET", undefined, undefined, { chat_id: String(chat_id) }),
 
   send: (chat_id: number, text: string) =>
     call(CHATS_URL, "send", "POST", { chat_id, text }),
+
+  sendMedia: (chat_id: number, data: string, mime_type: string, msg_type: string, text: string) =>
+    call(CHATS_URL, "send_media", "POST", { chat_id, data, mime_type, msg_type, text }),
 };
 
 // Users
@@ -111,6 +118,12 @@ export const usersApi = {
 
   contacts: () => call(USERS_URL, "contacts", "GET"),
 
-  update: (data: { display_name?: string; bio?: string }) =>
+  update: (data: { display_name?: string; bio?: string; avatar_color?: string }) =>
     call(USERS_URL, "update", "POST", data),
+
+  updateAvatar: (data: string, mime_type: string) =>
+    call(USERS_URL, "update_avatar", "POST", { data, mime_type }),
+
+  blockUser: (user_id: number) =>
+    call(USERS_URL, "block", "POST", { user_id }),
 };
