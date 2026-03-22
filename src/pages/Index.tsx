@@ -1650,6 +1650,9 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
   const [showChatMenu, setShowChatMenu] = useState(false);
   const [recording, setRecording] = useState(false);
   const [showVideoNote, setShowVideoNote] = useState(false);
+  const [playingVoiceId, setPlayingVoiceId] = useState<number | null>(null);
+  const [voiceProgress, setVoiceProgress] = useState<Record<number, number>>({});
+  const audioRefs = useRef<Record<number, HTMLAudioElement | null>>({});
   const [showCall, setShowCall] = useState<"audio" | "video" | null>(null);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
@@ -1858,32 +1861,50 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
 
     if (isVoice) {
       const dur = m.text?.match(/(\d+)с/) ? parseInt(m.text.match(/(\d+)с/)![1]) : 0;
+      const isPlaying = playingVoiceId === m.id;
+      const progress = voiceProgress[m.id] ?? 0;
+      const toggleVoice = () => {
+        const audio = audioRefs.current[m.id];
+        if (!audio) return;
+        if (isPlaying) {
+          audio.pause();
+          setPlayingVoiceId(null);
+        } else {
+          if (playingVoiceId !== null && audioRefs.current[playingVoiceId]) {
+            audioRefs.current[playingVoiceId]!.pause();
+          }
+          audio.play().catch(() => {});
+          setPlayingVoiceId(m.id);
+        }
+      };
       return (
         <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
           <div className={`flex items-center gap-2 px-3 py-2.5 rounded-2xl max-w-[260px] w-[220px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
             {hasMedia ? (
               <>
-                <audio src={m.media_url} preload="metadata" className="hidden" id={`audio-${m.id}`}
-                  onTimeUpdate={e => { const a = e.currentTarget; const p = a.parentElement?.querySelector(".voice-progress") as HTMLElement; if (p) p.style.width = `${(a.currentTime / (a.duration || 1)) * 100}%`; }}
-                  onEnded={e => { const btn = e.currentTarget.parentElement?.querySelector(".voice-play-btn") as HTMLElement; if (btn) btn.setAttribute("data-playing", "false"); }}
+                <audio
+                  ref={el => { audioRefs.current[m.id] = el; }}
+                  src={m.media_url}
+                  preload="metadata"
+                  className="hidden"
+                  onTimeUpdate={e => {
+                    const a = e.currentTarget;
+                    setVoiceProgress(p => ({ ...p, [m.id]: (a.currentTime / (a.duration || 1)) * 100 }));
+                  }}
+                  onEnded={() => {
+                    setPlayingVoiceId(null);
+                    setVoiceProgress(p => ({ ...p, [m.id]: 0 }));
+                  }}
                 />
-                <button className="voice-play-btn w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center vm-gradient-bg text-white"
-                  data-playing="false"
-                  onClick={e => {
-                    const btn = e.currentTarget;
-                    const audio = btn.parentElement?.querySelector("audio") as HTMLAudioElement;
-                    if (!audio) return;
-                    if (btn.getAttribute("data-playing") === "true") {
-                      audio.pause(); btn.setAttribute("data-playing", "false");
-                    } else {
-                      audio.play().catch(() => {}); btn.setAttribute("data-playing", "true");
-                    }
-                  }}>
-                  <Icon name="Play" size={14} />
+                <button
+                  className="w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center vm-gradient-bg text-white"
+                  onClick={toggleVoice}
+                >
+                  <Icon name={isPlaying ? "Pause" : "Play"} size={14} />
                 </button>
                 <div className="flex-1 min-w-0">
                   <div className="relative h-1 bg-white/20 rounded-full overflow-hidden">
-                    <div className="voice-progress h-full bg-white/70 rounded-full transition-all" style={{ width: "0%" }} />
+                    <div className="h-full bg-white/70 rounded-full transition-all" style={{ width: `${progress}%` }} />
                   </div>
                   <div className={`text-[10px] mt-1 flex items-center justify-between ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
                     <span>{dur ? `${dur}с` : "голосовое"}</span>
