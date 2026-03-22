@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Icon from "@/components/ui/icon";
-import { authApi, chatsApi, usersApi, callsApi, getToken, getStoredUser, saveSession, clearSession } from "@/lib/api";
+import { authApi, chatsApi, usersApi, callsApi, getToken, getStoredUser, saveSession, clearSession, setUnauthorizedHandler } from "@/lib/api";
 import type { User, Chat, Message } from "@/lib/api";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -29,7 +29,13 @@ const VoiceMessage = ({ mediaUrl, dur, time, isOut, status }: VoiceMessageProps)
       audio.pause();
       setPlaying(false);
     } else {
-      audio.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+      if (audio.ended || progress >= 99.9) {
+        audio.currentTime = 0;
+        setProgress(0);
+        setCurrentTime(0);
+      }
+      const p = audio.play();
+      if (p) p.then(() => setPlaying(true)).catch(() => setPlaying(false));
     }
   };
 
@@ -2320,6 +2326,9 @@ export default function Index() {
   }, [me, incomingCall, activeCall]);
 
   useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setMe(null);
+    });
     if (getToken() && !me) {
       authApi.me().then(res => {
         if (res.ok) setMe(res.user);

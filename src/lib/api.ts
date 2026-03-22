@@ -25,6 +25,12 @@ export function clearSession() {
   localStorage.removeItem(USER_KEY);
 }
 
+type UnauthorizedHandler = () => void;
+let onUnauthorized: UnauthorizedHandler | null = null;
+export function setUnauthorizedHandler(fn: UnauthorizedHandler) {
+  onUnauthorized = fn;
+}
+
 export interface User {
   id: number;
   username: string;
@@ -81,6 +87,13 @@ async function call(baseUrl: string, action: string, method = "GET", body?: obje
     headers,
     body: body ? JSON.stringify(body) : undefined,
   });
+
+  if (res.status === 401) {
+    clearSession();
+    if (onUnauthorized) onUnauthorized();
+    return { ok: false, error: "Сессия истекла" };
+  }
+
   return res.json();
 }
 
