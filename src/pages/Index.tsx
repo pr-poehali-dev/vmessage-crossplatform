@@ -199,13 +199,17 @@ function VoiceRecorder({ onSend, onCancel }: {
     if (!mediaRef.current || mediaRef.current.state !== "recording") return;
     if (timerRef.current) clearInterval(timerRef.current);
     const dur = secondsRef.current;
-    mediaRef.current.onstop = () => {
-      const mimeType = mediaRef.current?.mimeType || "audio/webm";
+    const mr = mediaRef.current;
+    const mimeType = mr.mimeType || "audio/webm";
+    mr.onstop = () => {
+      // Останавливаем треки только после получения всех данных
+      streamRef.current?.getTracks().forEach(t => t.stop());
       const blob = new Blob(chunksRef.current, { type: mimeType });
       onSend(blob, dur);
     };
-    mediaRef.current.stop();
-    streamRef.current?.getTracks().forEach(t => t.stop());
+    // Запрашиваем финальный чанк перед остановкой
+    mr.requestData();
+    mr.stop();
   };
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -270,12 +274,14 @@ function VideoNoteRecorder({ onSend, onCancel }: {
     if (!mediaRef.current || mediaRef.current.state !== "recording") return;
     const dur = secondsRef.current;
     if (timerRef.current) clearInterval(timerRef.current);
-    mediaRef.current.onstop = () => {
-      const mimeType = mediaRef.current?.mimeType || "video/webm";
+    const mr = mediaRef.current;
+    const mimeType = mr.mimeType || "video/webm";
+    mr.onstop = () => {
       const blob = new Blob(chunksRef.current, { type: mimeType });
       onSend(blob, dur);
     };
-    mediaRef.current.stop();
+    mr.requestData();
+    mr.stop();
   }, [onSend]);
 
   const startRec = () => {
@@ -599,18 +605,25 @@ function CallModal({ chat, calleeId, type, onClose }: {
         if (statusRes.status === "accepted" && statusRes.has_answer && pcRef.current?.remoteDescription === null) {
           const ansRes = await callsApi.getAnswer(callIdRef.current);
           if (ansRes.ok && ansRes.answer) {
-            await pcRef.current?.setRemoteDescription(JSON.parse(ansRes.answer));
+            await pcRef.current?.setRemoteDescription(new RTCSessionDescription(JSON.parse(ansRes.answer)));
             setStatus("connected");
             timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
           }
         }
 
-        // Получаем ICE от callee
-        if (statusRes.status === "accepted") {
+        // Получаем ICE от callee (только после установки remoteDescription)
+        if (statusRes.status === "accepted" && pcRef.current?.remoteDescription) {
           const iceRes = await callsApi.getIce(callIdRef.current, "caller");
           if (iceRes.ok && iceRes.candidates?.length) {
             for (const c of iceRes.candidates) {
-              try { await pcRef.current?.addIceCandidate(JSON.parse(c)); } catch (_e) { void _e; }
+              try {
+                const cand = typeof c === "string" ? JSON.parse(c) : c;
+                const key = JSON.stringify(cand);
+                if (!iceSentRef.current.includes(key)) {
+                  iceSentRef.current.push(key);
+                  await pcRef.current?.addIceCandidate(new RTCIceCandidate(cand));
+                }
+              } catch (_e) { void _e; }
             }
           }
         }
@@ -798,23 +811,35 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
       };
 
       // 4. Устанавливаем offer и создаём answer
-      await pc.setRemoteDescription(JSON.parse(offerRes.offer));
+      await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(offerRes.offer)));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      await callsApi.sendAnswer(callId, JSON.stringify(answer));
+      // accept обновляет статус до 'accepted' и сохраняет answer
+      await callsApi.accept(callId, JSON.stringify(answer));
 
       timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
+
+      const appliedIce = new Set<string>();
 
       // 5. Polling — получаем ICE от caller
       pollRef.current = setInterval(async () => {
         if (cancelled) return;
         const statusRes = await callsApi.getStatus(callId);
-        if (statusRes.status === "ended") { cleanup(); onClose(); return; }
+        if (statusRes.status === "ended" || statusRes.status === "rejected") {
+          cleanup(); onClose(); return;
+        }
 
         const iceRes = await callsApi.getIce(callId, "callee");
         if (iceRes.ok && iceRes.candidates?.length) {
           for (const c of iceRes.candidates) {
-            try { await pcRef.current?.addIceCandidate(JSON.parse(c)); } catch (_e) { void _e; }
+            try {
+              const cand = typeof c === "string" ? JSON.parse(c) : c;
+              const key = JSON.stringify(cand);
+              if (!appliedIce.has(key) && pcRef.current?.remoteDescription) {
+                appliedIce.add(key);
+                await pcRef.current.addIceCandidate(new RTCIceCandidate(cand));
+              }
+            } catch (_e) { void _e; }
           }
         }
       }, 2000);
@@ -1663,32 +1688,36 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     }
   };
 
+  const blobToBase64 = (blob: Blob): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve((reader.result as string).split(",")[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+
   const sendVoice = async (blob: Blob, duration: number) => {
     setRecording(false);
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const base64 = (reader.result as string).split(",")[1];
-      const res = await chatsApi.sendMedia(chat.id, base64, "audio/webm", "voice", `🎤 Голосовое ${duration}с`);
-      if (res.ok) setMessages(m => [...m, {
-        ...res.message, sender_id: me.id, sender_name: me.display_name,
-        sender_color: me.avatar_color, sender_username: me.username
-      }]);
-    };
-    reader.readAsDataURL(blob);
+    if (!blob.size) return;
+    const mimeType = blob.type || "audio/webm";
+    const base64 = await blobToBase64(blob);
+    const res = await chatsApi.sendMedia(chat.id, base64, mimeType, "voice", `🎤 Голосовое ${duration}с`);
+    if (res.ok) setMessages(m => [...m, {
+      ...res.message, sender_id: me.id, sender_name: me.display_name,
+      sender_color: me.avatar_color, sender_username: me.username
+    }]);
   };
 
   const sendVideoNote = async (blob: Blob, duration: number) => {
     setShowVideoNote(false);
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const base64 = (reader.result as string).split(",")[1];
-      const res = await chatsApi.sendMedia(chat.id, base64, "video/webm", "video_note", `⭕ Видеосообщение ${duration}с`);
-      if (res.ok) setMessages(m => [...m, {
-        ...res.message, sender_id: me.id, sender_name: me.display_name,
-        sender_color: me.avatar_color, sender_username: me.username
-      }]);
-    };
-    reader.readAsDataURL(blob);
+    if (!blob.size) return;
+    const mimeType = blob.type || "video/webm";
+    const base64 = await blobToBase64(blob);
+    const res = await chatsApi.sendMedia(chat.id, base64, mimeType, "video_note", `⭕ Видеосообщение ${duration}с`);
+    if (res.ok) setMessages(m => [...m, {
+      ...res.message, sender_id: me.id, sender_name: me.display_name,
+      sender_color: me.avatar_color, sender_username: me.username
+    }]);
   };
 
   const sendFile = async (file: File, msgType = "file") => {
@@ -1985,11 +2014,11 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
       </div>
 
       {/* Input */}
-      <div className="vm-glass border-t px-3 py-3 flex-shrink-0">
+      <div className="vm-glass border-t px-2 py-2 flex-shrink-0">
         {recording ? (
           <VoiceRecorder onSend={sendVoice} onCancel={() => setRecording(false)} />
         ) : (
-          <div className="flex items-end gap-2">
+          <div className="flex items-center gap-1.5 w-full overflow-hidden">
             {/* Attach menu */}
             <div className="relative flex-shrink-0">
               <button onClick={() => setShowAttachMenu(v => !v)} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground hover:text-violet-500">
@@ -2052,14 +2081,14 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
                 <Icon name="Send" size={18} />
               </button>
             ) : (
-              <div className="flex items-center gap-1 flex-shrink-0">
+              <div className="flex items-center gap-1.5 flex-shrink-0 min-w-0">
                 <button onClick={() => setRecording(true)} title="Голосовое сообщение"
-                  className="p-2.5 rounded-xl vm-gradient-bg text-white hover:opacity-90 active:scale-95 transition-all shadow-lg shadow-violet-500/30">
-                  <Icon name="Mic" size={18} />
+                  className="w-9 h-9 flex items-center justify-center rounded-xl vm-gradient-bg text-white hover:opacity-90 active:scale-95 transition-all shadow-md shadow-violet-500/30 flex-shrink-0">
+                  <Icon name="Mic" size={16} />
                 </button>
                 <button onClick={() => setShowVideoNote(true)} title="Видеозаметка"
-                  className="p-2.5 rounded-xl bg-indigo-500 text-white hover:opacity-90 active:scale-95 transition-all shadow-lg shadow-indigo-500/30">
-                  <Icon name="Video" size={18} />
+                  className="w-9 h-9 flex items-center justify-center rounded-xl bg-indigo-500 text-white hover:opacity-90 active:scale-95 transition-all shadow-md shadow-indigo-500/30 flex-shrink-0">
+                  <Icon name="Video" size={16} />
                 </button>
               </div>
             )}
@@ -2109,12 +2138,16 @@ export default function Index() {
   }, [me]);
 
   // Polling входящих звонков
+  const seenCallIds = useRef<Set<number>>(new Set());
   useEffect(() => {
     if (!me) return;
     const poll = setInterval(async () => {
       if (incomingCall || activeCall) return;
       const res = await callsApi.getIncoming();
       if (res.ok && res.call) {
+        const callId = res.call.id;
+        if (seenCallIds.current.has(callId)) return;
+        seenCallIds.current.add(callId);
         setIncomingCall(res.call);
         // Звуковой сигнал входящего
         try {

@@ -189,6 +189,9 @@ export const callsApi = {
   getOffer: (call_id: number) =>
     call(CALLS_URL, "get_offer", "GET", undefined, undefined, { call_id: String(call_id) }),
 
+  accept: (call_id: number, answer: string) =>
+    call(CALLS_URL, "accept", "POST", { call_id, answer }),
+
   sendAnswer: (call_id: number, answer: string) =>
     call(CALLS_URL, "send_answer", "POST", { call_id, answer }),
 
