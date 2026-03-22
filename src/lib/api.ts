@@ -1,6 +1,7 @@
 const AUTH_URL = "https://functions.poehali.dev/6c45d36d-91ca-4d3e-933e-004cbe05afb6";
 const CHATS_URL = "https://functions.poehali.dev/4a6b918d-c79c-42b2-83f9-e055781d4f33";
 const USERS_URL = "https://functions.poehali.dev/a8c06824-42b7-4519-a9e8-f5a4093a1536";
+const CALLS_URL = "https://functions.poehali.dev/d640259f-2a22-4683-92cd-bf19816867ac";
 
 export const TOKEN_KEY = "vm_token";
 export const USER_KEY = "vm_user";
@@ -41,6 +42,7 @@ export interface Chat {
   name: string;
   avatar_color: string;
   username?: string;
+  partner_id?: number;
   online: boolean;
   user_status?: "online" | "offline" | "inactive";
   avatar_url?: string;
@@ -172,4 +174,39 @@ export const usersApi = {
 
   setStatus: (online: boolean) =>
     call(USERS_URL, "set_status", "POST", { online }),
+};
+
+// Calls (WebRTC signaling)
+export const callsApi = {
+  initiate: (callee_id: number, call_type: "audio" | "video") =>
+    call(CALLS_URL, "initiate", "POST", { callee_id, call_type }),
+
+  getIncoming: () => call(CALLS_URL, "get_incoming", "GET"),
+
+  sendOffer: (call_id: number, offer: string) =>
+    call(CALLS_URL, "send_offer", "POST", { call_id, offer }),
+
+  getOffer: (call_id: number) =>
+    call(CALLS_URL, "get_offer", "GET", undefined, undefined, { call_id: String(call_id) }),
+
+  sendAnswer: (call_id: number, answer: string) =>
+    call(CALLS_URL, "send_answer", "POST", { call_id, answer }),
+
+  getAnswer: (call_id: number) =>
+    call(CALLS_URL, "get_answer", "GET", undefined, undefined, { call_id: String(call_id) }),
+
+  addIce: (call_id: number, candidate: string, role: "caller" | "callee") =>
+    call(CALLS_URL, "add_ice", "POST", { call_id, candidate, role }),
+
+  getIce: (call_id: number, role: "caller" | "callee") =>
+    call(CALLS_URL, "get_ice", "GET", undefined, undefined, { call_id: String(call_id), role }),
+
+  reject: (call_id: number) =>
+    call(CALLS_URL, "reject", "POST", { call_id }),
+
+  end: (call_id: number) =>
+    call(CALLS_URL, "end", "POST", { call_id }),
+
+  getStatus: (call_id: number) =>
+    call(CALLS_URL, "get_status", "GET", undefined, undefined, { call_id: String(call_id) }),
 };

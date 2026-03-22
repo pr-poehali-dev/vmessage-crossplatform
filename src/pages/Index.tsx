@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Icon from "@/components/ui/icon";
-import { authApi, chatsApi, usersApi, getToken, getStoredUser, saveSession, clearSession } from "@/lib/api";
+import { authApi, chatsApi, usersApi, callsApi, getToken, getStoredUser, saveSession, clearSession } from "@/lib/api";
 import type { User, Chat, Message } from "@/lib/api";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -436,38 +436,131 @@ function UserProfileModal({ user: initialUser, onClose, onStartChat, currentUser
   );
 }
 
-// ─── WebRTC Call Modal ─────────────────────────────────────────────────────────
-function CallModal({ chat, type, onClose }: { chat: Chat; type: "audio" | "video"; onClose: () => void }) {
-  const [status, setStatus] = useState<"calling" | "connected" | "ended">("calling");
+// ─── WebRTC Call Modal (caller side) ──────────────────────────────────────────
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+];
+
+function CallModal({ chat, calleeId, type, onClose }: {
+  chat: Chat; calleeId: number; type: "audio" | "video"; onClose: () => void;
+}) {
+  const [status, setStatus] = useState<"calling" | "connected" | "ended" | "rejected">("calling");
   const [seconds, setSeconds] = useState(0);
   const [muted, setMuted] = useState(false);
   const [camOff, setCamOff] = useState(false);
   const localVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const callIdRef = useRef<number | null>(null);
+  const iceSentRef = useRef<string[]>([]);
+
+  const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+
+  const cleanup = useCallback(() => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (pollRef.current) clearInterval(pollRef.current);
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    pcRef.current?.close();
+  }, []);
 
   useEffect(() => {
-    const constraints = type === "video" ? { video: true, audio: true } : { audio: true };
-    navigator.mediaDevices.getUserMedia(constraints).then(stream => {
+    let cancelled = false;
+    const run = async () => {
+      // 1. Получаем медиапоток
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(
+          type === "video" ? { video: true, audio: true } : { audio: true }
+        );
+      } catch {
+        stream = new MediaStream();
+      }
+      if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
       streamRef.current = stream;
       if (localVideoRef.current && type === "video") {
         localVideoRef.current.srcObject = stream;
-        localVideoRef.current.play();
+        localVideoRef.current.play().catch(() => {});
       }
-      const t = setTimeout(() => {
-        setStatus("connected");
-        timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
-      }, 2000);
-      return () => clearTimeout(t);
-    }).catch(() => {
-      setTimeout(() => { setStatus("connected"); timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000); }, 2000);
-    });
 
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-      streamRef.current?.getTracks().forEach(t => t.stop());
+      // 2. Инициируем звонок
+      const initRes = await callsApi.initiate(calleeId, type);
+      if (!initRes.ok || cancelled) { cleanup(); onClose(); return; }
+      callIdRef.current = initRes.call_id;
+
+      // 3. Создаём PeerConnection
+      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      pcRef.current = pc;
+      stream.getTracks().forEach(t => pc.addTrack(t, stream));
+
+      pc.ontrack = e => {
+        if (remoteVideoRef.current && e.streams[0]) {
+          remoteVideoRef.current.srcObject = e.streams[0];
+          remoteVideoRef.current.play().catch(() => {});
+        }
+      };
+
+      // Собираем ICE кандидаты и отправляем через polling
+      pc.onicecandidate = e => {
+        if (e.candidate && callIdRef.current) {
+          const cStr = JSON.stringify(e.candidate);
+          if (!iceSentRef.current.includes(cStr)) {
+            iceSentRef.current.push(cStr);
+            callsApi.addIce(callIdRef.current, cStr, "caller");
+          }
+        }
+      };
+
+      // 4. Создаём SDP offer
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await callsApi.sendOffer(callIdRef.current, JSON.stringify(offer));
+
+      // 5. Polling — ждём answer и ICE от callee
+      pollRef.current = setInterval(async () => {
+        if (!callIdRef.current || cancelled) return;
+        const statusRes = await callsApi.getStatus(callIdRef.current);
+        if (!statusRes.ok) return;
+
+        if (statusRes.status === "rejected" || statusRes.status === "ended") {
+          if (!cancelled) { setStatus(statusRes.status === "rejected" ? "rejected" : "ended"); cleanup(); setTimeout(onClose, 1500); }
+          return;
+        }
+
+        if (statusRes.status === "accepted" && statusRes.has_answer && pcRef.current?.remoteDescription === null) {
+          const ansRes = await callsApi.getAnswer(callIdRef.current);
+          if (ansRes.ok && ansRes.answer) {
+            await pcRef.current?.setRemoteDescription(JSON.parse(ansRes.answer));
+            setStatus("connected");
+            timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
+          }
+        }
+
+        // Получаем ICE от callee
+        if (statusRes.status === "accepted") {
+          const iceRes = await callsApi.getIce(callIdRef.current, "caller");
+          if (iceRes.ok && iceRes.candidates?.length) {
+            for (const c of iceRes.candidates) {
+              try { await pcRef.current?.addIceCandidate(JSON.parse(c)); } catch (_e) { void _e; }
+            }
+          }
+        }
+      }, 2000);
     };
-  }, [type]);
+
+    run();
+    return () => { cancelled = true; cleanup(); };
+  }, [calleeId, type, cleanup, onClose]);
+
+  const endCall = async () => {
+    if (callIdRef.current) await callsApi.end(callIdRef.current);
+    cleanup();
+    setStatus("ended");
+    setTimeout(onClose, 800);
+  };
 
   const toggleMute = () => {
     streamRef.current?.getAudioTracks().forEach(t => { t.enabled = !t.enabled; });
@@ -479,39 +572,27 @@ function CallModal({ chat, type, onClose }: { chat: Chat; type: "audio" | "video
     setCamOff(v => !v);
   };
 
-  const endCall = () => {
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    if (timerRef.current) clearInterval(timerRef.current);
-    setStatus("ended");
-    setTimeout(onClose, 800);
-  };
-
-  const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-
   return (
     <div className="fixed inset-0 z-50 flex flex-col items-center justify-between bg-gradient-to-b from-violet-900 to-indigo-900 p-8 animate-fade-in">
       {type === "video" && (
         <div className="absolute inset-0">
-          <div className="w-full h-full bg-black/60 flex items-center justify-center">
-            <div className="text-white/20 text-9xl">👤</div>
-          </div>
+          <video ref={remoteVideoRef} className="w-full h-full object-cover" playsInline autoPlay />
           <div className="absolute bottom-32 right-4 w-28 h-40 rounded-2xl overflow-hidden border-2 border-white/30 shadow-xl">
             <video ref={localVideoRef} className="w-full h-full object-cover scale-x-[-1]" muted playsInline />
             {camOff && <div className="absolute inset-0 bg-black/80 flex items-center justify-center"><Icon name="VideoOff" size={24} className="text-white" /></div>}
           </div>
         </div>
       )}
+      {type === "audio" && <audio ref={remoteVideoRef as React.RefObject<HTMLAudioElement>} autoPlay />}
 
       <div className="relative flex flex-col items-center mt-12 z-10">
         <Avatar label={chat.name} color={chat.avatar_color} size={100} src={chat.avatar_url || undefined} />
         <h2 className="text-white font-bold text-2xl mt-4">{chat.name}</h2>
         <p className="text-white/70 text-sm mt-1">
-          {status === "calling" ? (type === "video" ? "Видеозвонок..." : "Голосовой звонок...") :
-           status === "connected" ? fmt(seconds) : "Звонок завершён"}
+          {status === "calling" ? "Вызов..." :
+           status === "connected" ? fmt(seconds) :
+           status === "rejected" ? "Недоступен" : "Звонок завершён"}
         </p>
-        {status === "calling" && (
-          <p className="text-white/40 text-xs mt-2">Ожидание ответа... (WebRTC P2P)</p>
-        )}
         {status === "calling" && (
           <div className="flex gap-1 mt-3">
             {[0,1,2].map(i => (
@@ -533,8 +614,181 @@ function CallModal({ chat, type, onClose }: { chat: Chat; type: "audio" | "video
         <button onClick={endCall} className="w-16 h-16 rounded-full bg-red-500 text-white flex items-center justify-center shadow-2xl shadow-red-500/50 hover:bg-red-600 transition-colors">
           <Icon name="PhoneOff" size={26} />
         </button>
-        <button className="w-14 h-14 rounded-full bg-white/20 text-white flex items-center justify-center hover:bg-white/30 transition-colors">
-          <Icon name="Volume2" size={22} />
+      </div>
+    </div>
+  );
+}
+
+// ─── Incoming Call Modal (callee side) ────────────────────────────────────────
+function IncomingCallModal({ incoming, onAccept, onReject }: {
+  incoming: { id: number; caller_name: string; caller_color: string; caller_avatar?: string; call_type: string };
+  onAccept: () => void;
+  onReject: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in">
+      <div className="w-full max-w-sm bg-gradient-to-b from-violet-900 to-indigo-900 rounded-t-3xl sm:rounded-3xl p-8 flex flex-col items-center gap-5 animate-scale-in">
+        <div className="relative">
+          <Avatar label={incoming.caller_name} color={incoming.caller_color} size={80} src={incoming.caller_avatar} />
+          <div className="absolute inset-0 rounded-full border-4 border-white/30 animate-ping" />
+        </div>
+        <div className="text-center">
+          <p className="text-white/70 text-sm">{incoming.call_type === "video" ? "Видеозвонок" : "Голосовой звонок"}</p>
+          <h2 className="text-white font-bold text-2xl mt-1">{incoming.caller_name}</h2>
+        </div>
+        <div className="flex items-center gap-8">
+          <div className="flex flex-col items-center gap-2">
+            <button onClick={onReject} className="w-16 h-16 rounded-full bg-red-500 text-white flex items-center justify-center shadow-2xl shadow-red-500/50 hover:bg-red-600 transition-colors">
+              <Icon name="PhoneOff" size={26} />
+            </button>
+            <span className="text-white/60 text-xs">Отклонить</span>
+          </div>
+          <div className="flex flex-col items-center gap-2">
+            <button onClick={onAccept} className="w-16 h-16 rounded-full bg-emerald-500 text-white flex items-center justify-center shadow-2xl shadow-emerald-500/50 hover:bg-emerald-600 transition-colors animate-pulse">
+              <Icon name="Phone" size={26} />
+            </button>
+            <span className="text-white/60 text-xs">Принять</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Active Call (callee side after accept) ────────────────────────────────────
+function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callType, onClose }: {
+  callId: number; callerName: string; callerColor: string; callerAvatar?: string;
+  callType: string; onClose: () => void;
+}) {
+  const [seconds, setSeconds] = useState(0);
+  const [muted, setMuted] = useState(false);
+  const [camOff, setCamOff] = useState(false);
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const iceSentRef = useRef<string[]>([]);
+
+  const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+
+  const cleanup = useCallback(() => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (pollRef.current) clearInterval(pollRef.current);
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    pcRef.current?.close();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      // 1. Получаем медиапоток
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(
+          callType === "video" ? { video: true, audio: true } : { audio: true }
+        );
+      } catch {
+        stream = new MediaStream();
+      }
+      if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+      streamRef.current = stream;
+      if (localVideoRef.current && callType === "video") {
+        localVideoRef.current.srcObject = stream;
+        localVideoRef.current.play().catch(() => {});
+      }
+
+      // 2. Получаем offer от звонящего
+      const offerRes = await callsApi.getOffer(callId);
+      if (!offerRes.ok || !offerRes.offer || cancelled) { cleanup(); onClose(); return; }
+
+      // 3. Создаём PeerConnection
+      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      pcRef.current = pc;
+      stream.getTracks().forEach(t => pc.addTrack(t, stream));
+
+      pc.ontrack = e => {
+        if (remoteVideoRef.current && e.streams[0]) {
+          remoteVideoRef.current.srcObject = e.streams[0];
+          remoteVideoRef.current.play().catch(() => {});
+        }
+      };
+
+      pc.onicecandidate = e => {
+        if (e.candidate) {
+          const cStr = JSON.stringify(e.candidate);
+          if (!iceSentRef.current.includes(cStr)) {
+            iceSentRef.current.push(cStr);
+            callsApi.addIce(callId, cStr, "callee");
+          }
+        }
+      };
+
+      // 4. Устанавливаем offer и создаём answer
+      await pc.setRemoteDescription(JSON.parse(offerRes.offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await callsApi.sendAnswer(callId, JSON.stringify(answer));
+
+      timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
+
+      // 5. Polling — получаем ICE от caller
+      pollRef.current = setInterval(async () => {
+        if (cancelled) return;
+        const statusRes = await callsApi.getStatus(callId);
+        if (statusRes.status === "ended") { cleanup(); onClose(); return; }
+
+        const iceRes = await callsApi.getIce(callId, "callee");
+        if (iceRes.ok && iceRes.candidates?.length) {
+          for (const c of iceRes.candidates) {
+            try { await pcRef.current?.addIceCandidate(JSON.parse(c)); } catch (_e) { void _e; }
+          }
+        }
+      }, 2000);
+    };
+
+    run();
+    return () => { cancelled = true; cleanup(); };
+  }, [callId, callType, cleanup, onClose]);
+
+  const endCall = async () => {
+    await callsApi.end(callId);
+    cleanup();
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-between bg-gradient-to-b from-violet-900 to-indigo-900 p-8 animate-fade-in">
+      {callType === "video" && (
+        <div className="absolute inset-0">
+          <video ref={remoteVideoRef} className="w-full h-full object-cover" playsInline autoPlay />
+          <div className="absolute bottom-32 right-4 w-28 h-40 rounded-2xl overflow-hidden border-2 border-white/30 shadow-xl">
+            <video ref={localVideoRef} className="w-full h-full object-cover scale-x-[-1]" muted playsInline />
+          </div>
+        </div>
+      )}
+      {callType === "audio" && <audio ref={remoteVideoRef as React.RefObject<HTMLAudioElement>} autoPlay />}
+
+      <div className="relative flex flex-col items-center mt-12 z-10">
+        <Avatar label={callerName} color={callerColor} size={100} src={callerAvatar} />
+        <h2 className="text-white font-bold text-2xl mt-4">{callerName}</h2>
+        <p className="text-white/70 text-sm mt-1">{fmt(seconds)}</p>
+      </div>
+
+      <div className="relative flex items-center gap-6 z-10 mb-8">
+        <button onClick={() => { streamRef.current?.getAudioTracks().forEach(t => { t.enabled = !t.enabled; }); setMuted(v => !v); }}
+          className={`w-14 h-14 rounded-full ${muted ? "bg-red-500" : "bg-white/20"} text-white flex items-center justify-center`}>
+          <Icon name={muted ? "MicOff" : "Mic"} size={22} />
+        </button>
+        {callType === "video" && (
+          <button onClick={() => { streamRef.current?.getVideoTracks().forEach(t => { t.enabled = !t.enabled; }); setCamOff(v => !v); }}
+            className={`w-14 h-14 rounded-full ${camOff ? "bg-red-500" : "bg-white/20"} text-white flex items-center justify-center`}>
+            <Icon name={camOff ? "VideoOff" : "Video"} size={22} />
+          </button>
+        )}
+        <button onClick={endCall} className="w-16 h-16 rounded-full bg-red-500 text-white flex items-center justify-center shadow-2xl shadow-red-500/50 hover:bg-red-600 transition-colors">
+          <Icon name="PhoneOff" size={26} />
         </button>
       </div>
     </div>
@@ -1405,20 +1659,25 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     if (res.ok) onDeleteChat(chat.id);
   };
 
-  // Переключение режима голос/видео коротким тапом на кнопку микрофона
-  const handleMicTap = () => {
-    setRecordMode(m => m === "voice" ? "video" : "voice");
+  // Нажатие кнопки микрофона: сразу начинаем запись (voice или video)
+  const handleMicClick = () => {
+    if (recordMode === "voice") setRecording(true);
+    else setShowVideoNote(true);
   };
 
+  // Долгое нажатие переключает режим
   const handleMicPress = () => {
     micHoldTimer.current = setTimeout(() => {
-      if (recordMode === "voice") setRecording(true);
-      else setShowVideoNote(true);
-    }, 300);
+      setRecordMode(m => m === "voice" ? "video" : "voice");
+      micHoldTimer.current = null;
+    }, 600);
   };
 
   const handleMicRelease = () => {
-    if (micHoldTimer.current) clearTimeout(micHoldTimer.current);
+    if (micHoldTimer.current) {
+      clearTimeout(micHoldTimer.current);
+      micHoldTimer.current = null;
+    }
   };
 
   const renderMessage = (m: Message) => {
@@ -1587,7 +1846,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
 
   return (
     <div className="flex flex-col h-full animate-scale-in">
-      {showCall && <CallModal chat={chat} type={showCall} onClose={() => setShowCall(null)} />}
+      {showCall && chat.partner_id && <CallModal chat={chat} calleeId={chat.partner_id} type={showCall} onClose={() => setShowCall(null)} />}
       {showVideoNote && <VideoNoteRecorder onSend={sendVideoNote} onCancel={() => setShowVideoNote(false)} />}
 
       {/* Invite modal */}
@@ -1742,12 +2001,12 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
               </button>
             ) : (
               <button
-                onClick={handleMicTap}
+                onClick={handleMicClick}
                 onMouseDown={handleMicPress}
                 onMouseUp={handleMicRelease}
                 onTouchStart={handleMicPress}
-                onTouchEnd={handleMicRelease}
-                title={recordMode === "voice" ? "Голосовое (удержи для записи, тап — переключить на видео)" : "Видеозаметка (удержи для записи, тап — переключить на голос)"}
+                onTouchEnd={e => { handleMicRelease(); e.preventDefault(); handleMicClick(); }}
+                title={recordMode === "voice" ? "Голосовое сообщение (удержи 0.6с — переключить на видео)" : "Видеозаметка (удержи 0.6с — переключить на голос)"}
                 className="p-2.5 rounded-xl vm-gradient-bg text-white flex-shrink-0 hover:opacity-90 active:scale-95 transition-all shadow-lg shadow-violet-500/30">
                 <Icon name={recordMode === "voice" ? "Mic" : "Video"} size={18} />
               </button>
@@ -1776,6 +2035,8 @@ export default function Index() {
   const [chatsLoading, setChatsLoading] = useState(true);
   const [showNewChat, setShowNewChat] = useState(false);
   const [profileUser, setProfileUser] = useState<User | null>(null);
+  const [incomingCall, setIncomingCall] = useState<{id:number;caller_name:string;caller_color:string;caller_avatar?:string;call_type:string} | null>(null);
+  const [activeCall, setActiveCall] = useState<{id:number;caller_name:string;caller_color:string;caller_avatar?:string;call_type:string} | null>(null);
 
   // Онлайн-статус: сообщаем серверу о присутствии
   useEffect(() => {
@@ -1794,6 +2055,33 @@ export default function Index() {
       window.removeEventListener("beforeunload", handleHide);
     };
   }, [me]);
+
+  // Polling входящих звонков
+  useEffect(() => {
+    if (!me) return;
+    const poll = setInterval(async () => {
+      if (incomingCall || activeCall) return;
+      const res = await callsApi.getIncoming();
+      if (res.ok && res.call) {
+        setIncomingCall(res.call);
+        // Звуковой сигнал входящего
+        try {
+          const ctx = new AudioContext();
+          const ring = () => {
+            const osc = ctx.createOscillator();
+            const g = ctx.createGain();
+            osc.connect(g); g.connect(ctx.destination);
+            osc.frequency.value = 440; osc.type = "sine";
+            g.gain.setValueAtTime(0.2, ctx.currentTime);
+            g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+            osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.5);
+          };
+          ring(); setTimeout(ring, 700);
+        } catch (_e) { void _e; }
+      }
+    }, 3000);
+    return () => clearInterval(poll);
+  }, [me, incomingCall, activeCall]);
 
   useEffect(() => {
     if (getToken() && !me) {
@@ -1845,7 +2133,6 @@ export default function Index() {
 
   if (!me) return <AuthScreen onAuth={(_, user) => setMe(user)} />;
 
-  const activeNav = navItems.find(n => n.id === activeTab);
   const totalUnread = chats.reduce((s, c) => s + (c.unread || 0), 0);
   const isChatOpen = activeTab === "chats" && openChat;
 
@@ -1861,6 +2148,31 @@ export default function Index() {
 
   return (
     <div className="h-screen flex flex-col md:flex-row overflow-hidden bg-background font-golos">
+      {/* Входящий звонок */}
+      {incomingCall && !activeCall && (
+        <IncomingCallModal
+          incoming={incomingCall}
+          onReject={async () => {
+            await callsApi.reject(incomingCall.id);
+            setIncomingCall(null);
+          }}
+          onAccept={() => {
+            setActiveCall(incomingCall);
+            setIncomingCall(null);
+          }}
+        />
+      )}
+      {/* Активный звонок (callee) */}
+      {activeCall && (
+        <ActiveCallModal
+          callId={activeCall.id}
+          callerName={activeCall.caller_name}
+          callerColor={activeCall.caller_color}
+          callerAvatar={activeCall.caller_avatar}
+          callType={activeCall.call_type}
+          onClose={() => setActiveCall(null)}
+        />
+      )}
       {showNewChat && <NewChatModal onClose={() => setShowNewChat(false)} onCreated={handleNewChatCreated} />}
       {profileUser && (
         <UserProfileModal

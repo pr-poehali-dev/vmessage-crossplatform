@@ -91,7 +91,8 @@ def handler(event: dict, context) -> dict:
                 (SELECT COUNT(*) FROM {SCHEMA}.vm_messages m WHERE m.chat_id=c.id AND m.sender_id != %s AND m.msg_status='sent') AS unread,
                 c.is_public,
                 c.invite_code,
-                u2.last_seen AS partner_last_seen
+                u2.last_seen AS partner_last_seen,
+                u2.id AS partner_id
             FROM {SCHEMA}.vm_chats c
             JOIN {SCHEMA}.vm_chat_members cm ON cm.chat_id=c.id AND cm.user_id=%s
             LEFT JOIN {SCHEMA}.vm_chat_members cm2 ON cm2.chat_id=c.id AND cm2.user_id != %s AND c.type='private'
@@ -120,6 +121,7 @@ def handler(event: dict, context) -> dict:
                 "name": r[4] if is_private else r[2],
                 "avatar_color": r[5] if is_private else r[3],
                 "username": r[6],
+                "partner_id": r[16] if is_private else None,
                 "online": partner_online if is_private else False,
                 "user_status": status,
                 "avatar_url": r[9] if is_private else None,
@@ -344,6 +346,25 @@ def handler(event: dict, context) -> dict:
         if not cur.fetchone():
             cur.close(); conn.close()
             return resp(403, {"error": "Нет доступа"})
+
+        # Проверяем блокировку в приватном чате
+        cur.execute(f"""
+            SELECT cm2.user_id FROM {SCHEMA}.vm_chat_members cm1
+            JOIN {SCHEMA}.vm_chat_members cm2 ON cm2.chat_id=cm1.chat_id AND cm2.user_id != %s
+            JOIN {SCHEMA}.vm_chats c ON c.id=cm1.chat_id
+            WHERE cm1.chat_id=%s AND cm1.user_id=%s AND c.type='private'
+            LIMIT 1
+        """, (user_id, chat_id, user_id))
+        partner_row = cur.fetchone()
+        if partner_row:
+            partner_id = partner_row[0]
+            cur.execute(
+                f"SELECT 1 FROM {SCHEMA}.vm_blocked_users WHERE user_id=%s AND blocked_id=%s",
+                (partner_id, user_id)
+            )
+            if cur.fetchone():
+                cur.close(); conn.close()
+                return resp(403, {"error": "Пользователь вас заблокировал"})
 
         cur.execute(
             f"INSERT INTO {SCHEMA}.vm_messages (chat_id, sender_id, msg_text, msg_type, msg_status) VALUES (%s, %s, %s, 'text', 'sent') RETURNING id, created_at",
