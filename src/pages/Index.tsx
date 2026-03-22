@@ -168,67 +168,76 @@ function VoiceRecorder({ onSend, onCancel }: {
   onCancel: () => void;
 }) {
   const [seconds, setSeconds] = useState(0);
-  const mediaRef = useRef<MediaRecorder | null>(null);
+  const mrRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const secondsRef = useRef(0);
+  const durRef = useRef(0);
+  const committedRef = useRef(false); // флаг — уже отправляем, не трогать
 
   useEffect(() => {
+    let active = true;
     navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+      if (!active) { stream.getTracks().forEach(t => t.stop()); return; }
       streamRef.current = stream;
       const mimeType = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"]
         .find(t => MediaRecorder.isTypeSupported(t)) || "";
       const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-      mediaRef.current = mr;
+      mrRef.current = mr;
       mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
-      mr.start(200);
+      mr.start(100);
       timerRef.current = setInterval(() => {
-        secondsRef.current += 1;
-        setSeconds(secondsRef.current);
+        durRef.current += 1;
+        setSeconds(durRef.current);
       }, 1000);
-    }).catch(onCancel);
+    }).catch(() => { if (active) onCancel(); });
     return () => {
+      active = false;
       if (timerRef.current) clearInterval(timerRef.current);
-      streamRef.current?.getTracks().forEach(t => t.stop());
-      if (mediaRef.current?.state === "recording") mediaRef.current.stop();
+      // Только если НЕ в процессе отправки — просто останавливаем треки
+      if (!committedRef.current) {
+        streamRef.current?.getTracks().forEach(t => t.stop());
+        if (mrRef.current?.state === "recording") {
+          mrRef.current.onstop = null; // сбрасываем чтобы не вызвать onSend
+          mrRef.current.stop();
+        }
+      }
     };
   }, [onCancel]);
 
   const stop = () => {
-    if (!mediaRef.current || mediaRef.current.state !== "recording") return;
+    const mr = mrRef.current;
+    if (!mr || mr.state !== "recording") return;
+    committedRef.current = true;
     if (timerRef.current) clearInterval(timerRef.current);
-    const dur = secondsRef.current;
-    const mr = mediaRef.current;
+    const dur = durRef.current;
     const mimeType = mr.mimeType || "audio/webm";
     mr.onstop = () => {
-      // Останавливаем треки только после получения всех данных
       streamRef.current?.getTracks().forEach(t => t.stop());
       const blob = new Blob(chunksRef.current, { type: mimeType });
       onSend(blob, dur);
     };
-    // Запрашиваем финальный чанк перед остановкой
-    mr.requestData();
+    try { mr.requestData(); } catch (_) { /* not all browsers support */ }
     mr.stop();
   };
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
   return (
-    <div className="flex items-center gap-3 bg-red-50 dark:bg-red-900/20 rounded-2xl px-4 py-2.5">
-      <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse flex-shrink-0" />
+    <div className="flex items-center gap-2 bg-red-50 dark:bg-red-900/20 rounded-2xl px-3 py-2.5">
+      <div className="w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse flex-shrink-0" />
       <span className="text-red-500 font-mono text-sm font-semibold flex-1">{fmt(seconds)}</span>
-      <div className="flex items-center gap-1.5">
-        {[...Array(6)].map((_, i) => (
-          <div key={i} className="w-1 bg-red-400 rounded-full animate-pulse"
-            style={{ height: `${8 + Math.sin(i * 1.2 + seconds) * 8}px`, animationDelay: `${i * 0.1}s` }} />
+      <div className="flex items-center gap-1 flex-shrink-0">
+        {[...Array(5)].map((_, i) => (
+          <div key={i} className="w-0.5 bg-red-400 rounded-full animate-pulse"
+            style={{ height: `${6 + Math.abs(Math.sin(i * 1.2 + seconds)) * 10}px`, animationDelay: `${i * 0.1}s` }} />
         ))}
       </div>
-      <button onClick={onCancel} className="p-1.5 rounded-xl hover:bg-red-100 dark:hover:bg-red-900/40 text-muted-foreground">
-        <Icon name="Trash2" size={16} />
+      <button onClick={onCancel} className="p-1.5 rounded-xl hover:bg-red-100 dark:hover:bg-red-900/40 text-muted-foreground flex-shrink-0">
+        <Icon name="Trash2" size={15} />
       </button>
-      <button onClick={stop} className="p-2 rounded-xl vm-gradient-bg text-white shadow-lg">
-        <Icon name="Send" size={16} />
+      <button onClick={stop} className="p-2 rounded-xl vm-gradient-bg text-white shadow-lg flex-shrink-0">
+        <Icon name="Send" size={15} />
       </button>
     </div>
   );
@@ -245,16 +254,19 @@ function VideoNoteRecorder({ onSend, onCancel }: {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
   const videoRef = useRef<HTMLVideoElement>(null);
-  const mediaRef = useRef<MediaRecorder | null>(null);
+  const mrRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const secondsRef = useRef(0);
+  const durRef = useRef(0);
+  const committedRef = useRef(false);
   const MAX = 60;
 
   useEffect(() => {
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: 480, height: 480 }, audio: true })
+    let active = true;
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true })
       .then(stream => {
+        if (!active) { stream.getTracks().forEach(t => t.stop()); return; }
         streamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
@@ -262,46 +274,54 @@ function VideoNoteRecorder({ onSend, onCancel }: {
         }
         setReady(true);
       })
-      .catch(() => setError("Нет доступа к камере/микрофону"));
+      .catch(() => { if (active) setError("Нет доступа к камере/микрофону"); });
     return () => {
+      active = false;
       if (timerRef.current) clearInterval(timerRef.current);
-      streamRef.current?.getTracks().forEach(t => t.stop());
-      if (mediaRef.current?.state === "recording") mediaRef.current.stop();
+      if (!committedRef.current) {
+        streamRef.current?.getTracks().forEach(t => t.stop());
+        if (mrRef.current?.state === "recording") {
+          mrRef.current.onstop = null;
+          mrRef.current.stop();
+        }
+      }
     };
   }, []);
 
   const stopRec = useCallback(() => {
-    if (!mediaRef.current || mediaRef.current.state !== "recording") return;
-    const dur = secondsRef.current;
+    const mr = mrRef.current;
+    if (!mr || mr.state !== "recording") return;
+    committedRef.current = true;
     if (timerRef.current) clearInterval(timerRef.current);
-    const mr = mediaRef.current;
+    const dur = durRef.current;
     const mimeType = mr.mimeType || "video/webm";
     mr.onstop = () => {
+      streamRef.current?.getTracks().forEach(t => t.stop());
       const blob = new Blob(chunksRef.current, { type: mimeType });
       onSend(blob, dur);
     };
-    mr.requestData();
+    try { mr.requestData(); } catch (_) { /* ok */ }
     mr.stop();
   }, [onSend]);
 
   const startRec = () => {
     const stream = streamRef.current;
-    if (!stream) return;
+    if (!stream || !ready) return;
     const mimeType = ["video/webm;codecs=vp8,opus", "video/webm;codecs=vp9,opus", "video/webm", "video/mp4"]
       .find(t => MediaRecorder.isTypeSupported(t)) || "";
     const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-    mediaRef.current = mr;
+    mrRef.current = mr;
     chunksRef.current = [];
+    durRef.current = 0;
     mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
     mr.onerror = () => setError("Ошибка записи");
-    mr.start(200);
+    mr.start(100);
     setRecording(true);
-    secondsRef.current = 0;
     timerRef.current = setInterval(() => {
-      secondsRef.current += 1;
-      setSeconds(secondsRef.current);
-      setProgress((secondsRef.current / MAX) * 100);
-      if (secondsRef.current >= MAX) stopRec();
+      durRef.current += 1;
+      setSeconds(durRef.current);
+      setProgress((durRef.current / MAX) * 100);
+      if (durRef.current >= MAX) stopRec();
     }, 1000);
   };
 
@@ -522,7 +542,8 @@ function CallModal({ chat, calleeId, type, onClose }: {
   const streamRef = useRef<MediaStream | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const callIdRef = useRef<number | null>(null);
-  const iceSentRef = useRef<string[]>([]);
+  const iceSentRef = useRef<Set<string>>(new Set());
+  const iceReceivedRef = useRef<Set<string>>(new Set());
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
@@ -579,8 +600,8 @@ function CallModal({ chat, calleeId, type, onClose }: {
       pc.onicecandidate = e => {
         if (e.candidate && callIdRef.current) {
           const cStr = JSON.stringify(e.candidate);
-          if (!iceSentRef.current.includes(cStr)) {
-            iceSentRef.current.push(cStr);
+          if (!iceSentRef.current.has(cStr)) {
+            iceSentRef.current.add(cStr);
             callsApi.addIce(callIdRef.current, cStr, "caller");
           }
         }
@@ -619,8 +640,8 @@ function CallModal({ chat, calleeId, type, onClose }: {
               try {
                 const cand = typeof c === "string" ? JSON.parse(c) : c;
                 const key = JSON.stringify(cand);
-                if (!iceSentRef.current.includes(key)) {
-                  iceSentRef.current.push(key);
+                if (!iceReceivedRef.current.has(key)) {
+                  iceReceivedRef.current.add(key);
                   await pcRef.current?.addIceCandidate(new RTCIceCandidate(cand));
                 }
               } catch (_e) { void _e; }
@@ -631,7 +652,12 @@ function CallModal({ chat, calleeId, type, onClose }: {
     };
 
     run();
-    return () => { cancelled = true; cleanup(); };
+    return () => {
+      cancelled = true;
+      // При размонтировании завершаем звонок на сервере
+      if (callIdRef.current) callsApi.end(callIdRef.current);
+      cleanup();
+    };
   }, [calleeId, type, cleanup, onClose]);
 
   const endCall = async () => {
@@ -749,7 +775,8 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
-  const iceSentRef = useRef<string[]>([]);
+  const iceSentRef = useRef<Set<string>>(new Set());
+  const iceReceivedRef = useRef<Set<string>>(new Set());
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
@@ -803,8 +830,8 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
       pc.onicecandidate = e => {
         if (e.candidate) {
           const cStr = JSON.stringify(e.candidate);
-          if (!iceSentRef.current.includes(cStr)) {
-            iceSentRef.current.push(cStr);
+          if (!iceSentRef.current.has(cStr)) {
+            iceSentRef.current.add(cStr);
             callsApi.addIce(callId, cStr, "callee");
           }
         }
@@ -819,8 +846,6 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
 
       timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
 
-      const appliedIce = new Set<string>();
-
       // 5. Polling — получаем ICE от caller
       pollRef.current = setInterval(async () => {
         if (cancelled) return;
@@ -830,13 +855,13 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
         }
 
         const iceRes = await callsApi.getIce(callId, "callee");
-        if (iceRes.ok && iceRes.candidates?.length) {
+        if (iceRes.ok && iceRes.candidates?.length && pcRef.current?.remoteDescription) {
           for (const c of iceRes.candidates) {
             try {
               const cand = typeof c === "string" ? JSON.parse(c) : c;
               const key = JSON.stringify(cand);
-              if (!appliedIce.has(key) && pcRef.current?.remoteDescription) {
-                appliedIce.add(key);
+              if (!iceReceivedRef.current.has(key)) {
+                iceReceivedRef.current.add(key);
                 await pcRef.current.addIceCandidate(new RTCIceCandidate(cand));
               }
             } catch (_e) { void _e; }
@@ -846,7 +871,11 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
     };
 
     run();
-    return () => { cancelled = true; cleanup(); };
+    return () => {
+      cancelled = true;
+      callsApi.end(callId);
+      cleanup();
+    };
   }, [callId, callType, cleanup, onClose]);
 
   const endCall = async () => {
@@ -2018,36 +2047,37 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
         {recording ? (
           <VoiceRecorder onSend={sendVoice} onCancel={() => setRecording(false)} />
         ) : (
-          <div className="flex items-center gap-1.5 w-full overflow-hidden">
-            {/* Attach menu */}
+          <div className="flex items-center gap-1 w-full">
+            {/* Attach + Emoji в одном меню */}
             <div className="relative flex-shrink-0">
-              <button onClick={() => setShowAttachMenu(v => !v)} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground hover:text-violet-500">
-                <Icon name="Paperclip" size={20} />
+              <button onClick={() => setShowAttachMenu(v => !v)}
+                className="w-8 h-8 flex items-center justify-center rounded-xl hover:bg-secondary transition-colors text-muted-foreground">
+                <Icon name="Paperclip" size={18} />
               </button>
               {showAttachMenu && (
                 <div className="absolute bottom-full left-0 mb-2 bg-card rounded-2xl shadow-2xl border border-border p-2 z-50 animate-scale-in min-w-[160px]">
-                  <button onClick={() => fileInputRef.current?.click()}
+                  <button onClick={() => { setShowAttachMenu(false); fileInputRef.current?.click(); }}
                     className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-secondary transition-colors text-sm">
                     <div className="w-8 h-8 rounded-xl bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
                       <Icon name="Image" size={16} className="text-blue-500" />
                     </div>
                     Фото
                   </button>
-                  <button onClick={() => videoInputRef.current?.click()}
+                  <button onClick={() => { setShowAttachMenu(false); videoInputRef.current?.click(); }}
                     className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-secondary transition-colors text-sm">
                     <div className="w-8 h-8 rounded-xl bg-purple-100 dark:bg-purple-900/30 flex items-center justify-center">
                       <Icon name="Film" size={16} className="text-purple-500" />
                     </div>
                     Видео
                   </button>
-                  <button onClick={() => docInputRef.current?.click()}
+                  <button onClick={() => { setShowAttachMenu(false); docInputRef.current?.click(); }}
                     className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-secondary transition-colors text-sm">
                     <div className="w-8 h-8 rounded-xl bg-green-100 dark:bg-green-900/30 flex items-center justify-center">
                       <Icon name="FileText" size={16} className="text-green-500" />
                     </div>
                     Файл
                   </button>
-                  <button onClick={sendLocation}
+                  <button onClick={() => { setShowAttachMenu(false); sendLocation(); }}
                     className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-secondary transition-colors text-sm">
                     <div className="w-8 h-8 rounded-xl bg-orange-100 dark:bg-orange-900/30 flex items-center justify-center">
                       <Icon name="MapPin" size={16} className="text-orange-500" />
@@ -2058,39 +2088,40 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
               )}
             </div>
 
-            {/* Emoji */}
-            <div className="relative flex-shrink-0">
-              <button onClick={() => setShowEmoji(v => !v)} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground hover:text-violet-500">
-                <Icon name="Smile" size={20} />
+            {/* Emoji — скрыт на маленьких экранах */}
+            <div className="relative flex-shrink-0 hidden sm:block">
+              <button onClick={() => setShowEmoji(v => !v)}
+                className="w-8 h-8 flex items-center justify-center rounded-xl hover:bg-secondary transition-colors text-muted-foreground">
+                <Icon name="Smile" size={18} />
               </button>
               {showEmoji && (
                 <EmojiPicker onPick={e => { setInput(v => v + e); inputRef.current?.focus(); }} onClose={() => setShowEmoji(false)} />
               )}
             </div>
 
-            <div className="flex-1 bg-secondary rounded-2xl px-4 py-2.5 flex items-center min-h-[42px]">
+            <div className="flex-1 bg-secondary rounded-2xl px-3 py-2 flex items-center min-h-[38px]">
               <input ref={inputRef} value={input} onChange={e => setInput(e.target.value)}
                 onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-                placeholder="Написать сообщение..."
-                className="flex-1 bg-transparent outline-none text-sm" />
+                placeholder="Написать..."
+                className="flex-1 bg-transparent outline-none text-sm min-w-0" />
             </div>
 
             {input.trim() ? (
               <button onClick={send}
-                className="p-2.5 rounded-xl vm-gradient-bg text-white flex-shrink-0 hover:opacity-90 active:scale-95 transition-all shadow-lg shadow-violet-500/30">
-                <Icon name="Send" size={18} />
+                className="w-9 h-9 flex items-center justify-center rounded-xl vm-gradient-bg text-white flex-shrink-0 hover:opacity-90 active:scale-95 transition-all shadow-md shadow-violet-500/30">
+                <Icon name="Send" size={17} />
               </button>
             ) : (
-              <div className="flex items-center gap-1.5 flex-shrink-0 min-w-0">
-                <button onClick={() => setRecording(true)} title="Голосовое сообщение"
-                  className="w-9 h-9 flex items-center justify-center rounded-xl vm-gradient-bg text-white hover:opacity-90 active:scale-95 transition-all shadow-md shadow-violet-500/30 flex-shrink-0">
-                  <Icon name="Mic" size={16} />
+              <>
+                <button onClick={() => setRecording(true)} title="Голосовое"
+                  className="w-9 h-9 flex items-center justify-center rounded-xl vm-gradient-bg text-white flex-shrink-0 hover:opacity-90 active:scale-95 transition-all shadow-md shadow-violet-500/30">
+                  <Icon name="Mic" size={17} />
                 </button>
                 <button onClick={() => setShowVideoNote(true)} title="Видеозаметка"
-                  className="w-9 h-9 flex items-center justify-center rounded-xl bg-indigo-500 text-white hover:opacity-90 active:scale-95 transition-all shadow-md shadow-indigo-500/30 flex-shrink-0">
-                  <Icon name="Video" size={16} />
+                  className="w-9 h-9 flex items-center justify-center rounded-xl bg-indigo-500 text-white flex-shrink-0 hover:opacity-90 active:scale-95 transition-all shadow-md shadow-indigo-500/30">
+                  <Icon name="Video" size={17} />
                 </button>
-              </div>
+              </>
             )}
           </div>
         )}
