@@ -177,26 +177,43 @@ function VoiceRecorder({ onSend, onCancel }: {
 
   useEffect(() => {
     isMountedRef.current = true;
+    // iOS Safari поддерживает только audio/mp4, остальные браузеры — webm/opus
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    const mimeTypes = isIOS
+      ? ["audio/mp4", "audio/aac", ""]
+      : ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4", ""];
+    const mimeType = mimeTypes.find(t => !t || MediaRecorder.isTypeSupported(t)) ?? "";
+
     navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
       if (!isMountedRef.current) { stream.getTracks().forEach(t => t.stop()); return; }
       streamRef.current = stream;
-      const mimeType = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"]
-        .find(t => MediaRecorder.isTypeSupported(t)) || "";
-      const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      const opts = mimeType ? { mimeType } : {};
+      const mr = new MediaRecorder(stream, opts);
       mrRef.current = mr;
       mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
-      mr.start(1000);
-      console.log("[VoiceRecorder] started recording, mimeType:", mr.mimeType);
-      timerRef.current = setInterval(() => {
-        durRef.current += 1;
-        setSeconds(durRef.current);
-      }, 1000);
+      // iOS: start без timeslice, собираем данные через requestData по таймеру
+      if (isIOS) {
+        mr.start();
+        timerRef.current = setInterval(() => {
+          durRef.current += 1;
+          setSeconds(durRef.current);
+          if (mr.state === "recording") {
+            try { mr.requestData(); } catch (_) { /* ok */ }
+          }
+        }, 1000);
+      } else {
+        mr.start(1000);
+        timerRef.current = setInterval(() => {
+          durRef.current += 1;
+          setSeconds(durRef.current);
+        }, 1000);
+      }
     }).catch(() => { if (isMountedRef.current) onCancel(); });
     return () => {
       isMountedRef.current = false;
       if (timerRef.current) clearInterval(timerRef.current);
-      // Cleanup: stop MediaRecorder and tracks if still active
-      if (mrRef.current?.state === "recording") {
+      if (mrRef.current && mrRef.current.state !== "inactive") {
+        mrRef.current.onstop = null;
         try { mrRef.current.stop(); } catch (_) { /* ok */ }
       }
       streamRef.current?.getTracks().forEach(t => t.stop());
@@ -205,23 +222,24 @@ function VoiceRecorder({ onSend, onCancel }: {
 
   const stop = async () => {
     const mr = mrRef.current;
-    if (!mr || mr.state !== "recording") return;
+    if (!mr || mr.state === "inactive") return;
     if (timerRef.current) clearInterval(timerRef.current);
     const dur = durRef.current;
-    const mimeType = mr.mimeType || "audio/webm";
+    const mimeType = mr.mimeType || "audio/mp4";
 
-    // Promise-based stop: wait for MediaRecorder to finish
-    await new Promise<void>(resolve => {
+    // Запрашиваем последние данные, затем ждём stop
+    const collected = new Promise<void>(resolve => {
       mr.addEventListener("stop", resolve, { once: true });
-      mr.stop();
     });
-    console.log("[VoiceRecorder] stopped, chunks:", chunksRef.current.length);
+    if (mr.state === "recording") {
+      try { mr.requestData(); } catch (_) { /* ok */ }
+      try { mr.stop(); } catch (_) { /* ok */ }
+    }
+    await collected;
 
     const blob = new Blob(chunksRef.current, { type: mimeType });
-    onSend(blob, dur);
-
-    // Stop tracks only after onSend
     streamRef.current?.getTracks().forEach(t => t.stop());
+    onSend(blob, dur);
   };
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -253,6 +271,7 @@ function VideoNoteRecorder({ onSend, onCancel }: {
 }) {
   const [ready, setReady] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [sending, setSending] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
@@ -262,54 +281,58 @@ function VideoNoteRecorder({ onSend, onCancel }: {
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const durRef = useRef(0);
-  const isMountedRef = useRef(true);
+  const stoppedRef = useRef(false); // предотвращает двойную остановку
   const MAX = 60;
 
+  const stopStream = useCallback(() => {
+    streamRef.current?.getTracks().forEach(t => t.stop());
+  }, []);
+
   useEffect(() => {
-    isMountedRef.current = true;
     navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true })
       .then(stream => {
-        if (!isMountedRef.current) { stream.getTracks().forEach(t => t.stop()); return; }
         streamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           videoRef.current.play().catch(() => {});
         }
         setReady(true);
-        console.log("[VideoNote] camera ready");
       })
-      .catch(() => { if (isMountedRef.current) setError("Нет доступа к камере/микрофону"); });
+      .catch(() => setError("Нет доступа к камере/микрофону"));
     return () => {
-      isMountedRef.current = false;
       if (timerRef.current) clearInterval(timerRef.current);
-      // Cleanup: stop MediaRecorder and tracks
-      if (mrRef.current?.state === "recording") {
-        try { mrRef.current.stop(); } catch (_) { /* ok */ }
+      // Cleanup только если stopRec ещё не запустился
+      if (!stoppedRef.current) {
+        stopStream();
+        const mr = mrRef.current;
+        if (mr && mr.state !== "inactive") {
+          mr.onstop = null; // важно — убираем обработчик чтобы не вызвать onSend
+          try { mr.stop(); } catch (_) { /* ok */ }
+        }
       }
-      streamRef.current?.getTracks().forEach(t => t.stop());
     };
-  }, []);
+  }, [stopStream]);
 
   const stopRec = useCallback(async () => {
     const mr = mrRef.current;
-    if (!mr || mr.state !== "recording") return;
+    if (!mr || mr.state !== "recording" || stoppedRef.current) return;
+    stoppedRef.current = true;
     if (timerRef.current) clearInterval(timerRef.current);
     const dur = durRef.current;
     const mimeType = mr.mimeType || "video/webm";
+    setSending(true);
 
-    // Promise-based stop
-    await new Promise<void>(resolve => {
+    // Ждём все чанки через Promise
+    const collected = new Promise<void>(resolve => {
       mr.addEventListener("stop", resolve, { once: true });
-      mr.stop();
     });
-    console.log("[VideoNote] stopped, chunks:", chunksRef.current.length);
+    try { mr.stop(); } catch (_) { /* ok */ }
+    await collected;
 
     const blob = new Blob(chunksRef.current, { type: mimeType });
+    stopStream();
     onSend(blob, dur);
-
-    // Stop tracks only after onSend
-    streamRef.current?.getTracks().forEach(t => t.stop());
-  }, [onSend]);
+  }, [onSend, stopStream]);
 
   const startRec = () => {
     const stream = streamRef.current;
@@ -375,7 +398,11 @@ function VideoNoteRecorder({ onSend, onCancel }: {
               <button onClick={onCancel} className="w-12 h-12 rounded-full bg-white/20 text-white flex items-center justify-center hover:bg-white/30 transition-colors">
                 <Icon name="X" size={20} />
               </button>
-              {!recording ? (
+              {sending ? (
+                <div className="w-16 h-16 rounded-full bg-violet-500/30 text-white flex items-center justify-center">
+                  <div className="w-6 h-6 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                </div>
+              ) : !recording ? (
                 <button onClick={startRec} disabled={!ready}
                   className="w-16 h-16 rounded-full vm-gradient-bg text-white flex items-center justify-center shadow-2xl shadow-violet-500/50 disabled:opacity-40 hover:opacity-90 transition-opacity">
                   <Icon name="Video" size={26} />
@@ -388,7 +415,7 @@ function VideoNoteRecorder({ onSend, onCancel }: {
               )}
             </div>
             <p className="text-white/50 text-xs">
-              {!ready ? "Инициализация камеры..." : recording ? "Нажмите стоп для отправки" : "Нажмите для записи"}
+              {sending ? "Отправка..." : !ready ? "Инициализация камеры..." : recording ? "Нажмите стоп для отправки" : "Нажмите для записи"}
             </p>
           </>
         )}
@@ -1717,9 +1744,9 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
 
   const sendVoice = async (blob: Blob, duration: number) => {
     setRecording(false);
-    if (!blob || blob.size < 100) { console.warn("[VOICE] empty blob", blob?.size); return; }
-    const mimeType = blob.type || "audio/webm";
-    const ext = mimeType.includes("ogg") ? "ogg" : mimeType.includes("mp4") ? "m4a" : "webm";
+    if (!blob || blob.size < 10) { console.warn("[VOICE] empty blob", blob?.size); return; }
+    const mimeType = blob.type || "audio/mp4";
+    const ext = mimeType.includes("ogg") ? "ogg" : mimeType.includes("mp4") || mimeType.includes("m4a") ? "m4a" : "webm";
     console.log("[VOICE] sending", blob.size, "bytes,", mimeType);
     try {
       const base64 = await blobToBase64(blob);
@@ -1830,26 +1857,48 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     }
 
     if (isVoice) {
+      const dur = m.text?.match(/(\d+)с/) ? parseInt(m.text.match(/(\d+)с/)![1]) : 0;
       return (
         <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
-          <div className={`flex items-center gap-3 px-4 py-3 rounded-2xl max-w-[240px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
-            <div className="flex-1 min-w-0">
-              {hasMedia ? (
-                <audio src={m.media_url} controls className="w-full h-8" style={{ minWidth: 180 }} />
-              ) : (
-                <div className="flex items-center gap-0.5 h-5">
-                  {[...Array(12)].map((_, i) => (
-                    <div key={i} className={`w-1 rounded-full ${m.out ? "bg-white/60" : "bg-violet-300"}`}
-                      style={{ height: `${30 + Math.sin(i * 1.3) * 50}%` }} />
-                  ))}
+          <div className={`flex items-center gap-2 px-3 py-2.5 rounded-2xl max-w-[260px] w-[220px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
+            {hasMedia ? (
+              <>
+                <audio src={m.media_url} preload="metadata" className="hidden" id={`audio-${m.id}`}
+                  onTimeUpdate={e => { const a = e.currentTarget; const p = a.parentElement?.querySelector(".voice-progress") as HTMLElement; if (p) p.style.width = `${(a.currentTime / (a.duration || 1)) * 100}%`; }}
+                  onEnded={e => { const btn = e.currentTarget.parentElement?.querySelector(".voice-play-btn") as HTMLElement; if (btn) btn.setAttribute("data-playing", "false"); }}
+                />
+                <button className="voice-play-btn w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center vm-gradient-bg text-white"
+                  data-playing="false"
+                  onClick={e => {
+                    const btn = e.currentTarget;
+                    const audio = btn.parentElement?.querySelector("audio") as HTMLAudioElement;
+                    if (!audio) return;
+                    if (btn.getAttribute("data-playing") === "true") {
+                      audio.pause(); btn.setAttribute("data-playing", "false");
+                    } else {
+                      audio.play().catch(() => {}); btn.setAttribute("data-playing", "true");
+                    }
+                  }}>
+                  <Icon name="Play" size={14} />
+                </button>
+                <div className="flex-1 min-w-0">
+                  <div className="relative h-1 bg-white/20 rounded-full overflow-hidden">
+                    <div className="voice-progress h-full bg-white/70 rounded-full transition-all" style={{ width: "0%" }} />
+                  </div>
+                  <div className={`text-[10px] mt-1 flex items-center justify-between ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
+                    <span>{dur ? `${dur}с` : "голосовое"}</span>
+                    <span className="flex items-center gap-0.5">{m.time} {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={9} className="text-cyan-300" /> : <Icon name="CheckCheck" size={9} />)}</span>
+                  </div>
                 </div>
-              )}
-              <div className={`text-[10px] mt-0.5 ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
-                {m.text?.replace("🎤 Голосовое ", "") || "0с"} · {m.time}
-                {m.out && " "}
-                {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={10} className="text-cyan-300 inline" /> : <Icon name="CheckCheck" size={10} className="inline" />)}
+              </>
+            ) : (
+              <div className="flex items-center gap-0.5 h-5 flex-1">
+                {[...Array(12)].map((_, i) => (
+                  <div key={i} className={`w-1 rounded-full ${m.out ? "bg-white/60" : "bg-violet-300"}`}
+                    style={{ height: `${30 + Math.sin(i * 1.3) * 50}%` }} />
+                ))}
               </div>
-            </div>
+            )}
           </div>
         </div>
       );
