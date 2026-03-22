@@ -1,6 +1,6 @@
 """
-API пользователей V-message: поиск, обновление профиля, аватар, блокировка.
-Маршрутизация через ?action=search|contacts|update|update_avatar|block
+API пользователей V-message: поиск, обновление профиля, аватар, блокировка, контакты, статусы.
+Маршрутизация через ?action=search|contacts|update|update_avatar|remove_avatar|block|add_contact|remove_contact|set_status
 """
 import json
 import os
@@ -29,7 +29,7 @@ def resp(status: int, body: dict) -> dict:
 def get_user_by_token(cur, token: str):
     if not token:
         return None
-    cur.execute(f"SELECT id, username, display_name, avatar_color, bio, avatar_url FROM {SCHEMA}.vm_users WHERE session_token=%s", (token,))
+    cur.execute(f"SELECT id, username, display_name, avatar_color, bio, avatar_url FROM {SCHEMA}.vm_users WHERE session_token=%s AND is_active=TRUE", (token,))
     return cur.fetchone()
 
 
@@ -72,46 +72,122 @@ def handler(event: dict, context) -> dict:
     conn = get_conn()
     cur = conn.cursor()
 
+    # set_status — обновить онлайн-статус (не требует полного get_user_by_token для скорости)
+    if action == "set_status":
+        if not token:
+            cur.close(); conn.close()
+            return resp(401, {"error": "Не авторизован"})
+        is_online = body.get("online", True)
+        cur.execute(
+            f"UPDATE {SCHEMA}.vm_users SET is_online=%s, last_seen=NOW() WHERE session_token=%s AND is_active=TRUE",
+            (is_online, token)
+        )
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
+
     user = get_user_by_token(cur, token)
     if not user:
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
         return resp(401, {"error": "Не авторизован"})
 
     user_id = user[0]
 
-    # search
+    # search — поиск пользователей и публичных групп/каналов
     if action == "search":
         q = (qs.get("q") or "").strip()
         if len(q) < 2:
             cur.close(); conn.close()
             return resp(400, {"error": "Минимум 2 символа"})
+
+        # Ищем пользователей
         cur.execute(
-            f"SELECT id, username, display_name, avatar_color, bio, is_online, avatar_url FROM {SCHEMA}.vm_users WHERE (username ILIKE %s OR display_name ILIKE %s) AND id != %s LIMIT 20",
+            f"""SELECT id, username, display_name, avatar_color, bio, is_online, avatar_url, is_active
+                FROM {SCHEMA}.vm_users
+                WHERE (username ILIKE %s OR display_name ILIKE %s) AND id != %s
+                LIMIT 20""",
             (f"%{q}%", f"%{q}%", user_id)
         )
-        rows = cur.fetchall()
-        cur.close(); conn.close()
-        return resp(200, {"ok": True, "users": [
-            {"id": r[0], "username": r[1], "display_name": r[2], "avatar_color": r[3], "bio": r[4], "online": bool(r[5]), "avatar_url": r[6]}
-            for r in rows
-        ]})
+        users = cur.fetchall()
 
-    # contacts
+        # Ищем публичные группы и каналы
+        cur.execute(
+            f"""SELECT id, type, name, avatar_color, description, invite_code
+                FROM {SCHEMA}.vm_chats
+                WHERE is_public=TRUE AND (name ILIKE %s OR username ILIKE %s)
+                AND type IN ('group', 'channel')
+                LIMIT 10""",
+            (f"%{q}%", f"%{q}%")
+        )
+        chats = cur.fetchall()
+
+        cur.close(); conn.close()
+        return resp(200, {
+            "ok": True,
+            "users": [
+                {
+                    "id": r[0], "username": r[1], "display_name": r[2],
+                    "avatar_color": r[3], "bio": r[4], "online": bool(r[5]),
+                    "avatar_url": r[6],
+                    "status": "online" if bool(r[5]) else ("inactive" if not bool(r[7]) else "offline")
+                }
+                for r in users
+            ],
+            "public_chats": [
+                {"id": r[0], "type": r[1], "name": r[2], "avatar_color": r[3], "description": r[4], "invite_code": r[5]}
+                for r in chats
+            ]
+        })
+
+    # contacts — список контактов добавленных пользователем вручную
     if action == "contacts":
         cur.execute(f"""
-            SELECT DISTINCT u.id, u.username, u.display_name, u.avatar_color, u.bio, u.is_online, u.avatar_url
-            FROM {SCHEMA}.vm_users u
-            JOIN {SCHEMA}.vm_chat_members cm ON cm.user_id=u.id
-            JOIN {SCHEMA}.vm_chat_members cm2 ON cm2.chat_id=cm.chat_id AND cm2.user_id=%s
-            WHERE u.id != %s
+            SELECT u.id, u.username, u.display_name, u.avatar_color, u.bio, u.is_online, u.avatar_url, u.is_active
+            FROM {SCHEMA}.vm_contacts c
+            JOIN {SCHEMA}.vm_users u ON u.id=c.contact_id
+            WHERE c.user_id=%s
             ORDER BY u.display_name
-        """, (user_id, user_id))
+        """, (user_id,))
         rows = cur.fetchall()
         cur.close(); conn.close()
         return resp(200, {"ok": True, "contacts": [
-            {"id": r[0], "username": r[1], "display_name": r[2], "avatar_color": r[3], "bio": r[4], "online": bool(r[5]), "avatar_url": r[6]}
+            {
+                "id": r[0], "username": r[1], "display_name": r[2],
+                "avatar_color": r[3], "bio": r[4], "online": bool(r[5]),
+                "avatar_url": r[6],
+                "status": "online" if bool(r[5]) else ("inactive" if not bool(r[7]) else "offline")
+            }
             for r in rows
         ]})
+
+    # add_contact — добавить в контакты
+    if action == "add_contact":
+        contact_id = body.get("contact_id")
+        if not contact_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нет contact_id"})
+        cur.execute(
+            f"INSERT INTO {SCHEMA}.vm_contacts (user_id, contact_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (user_id, contact_id)
+        )
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
+
+    # remove_contact — удалить из контактов
+    if action == "remove_contact":
+        contact_id = body.get("contact_id")
+        if not contact_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нет contact_id"})
+        cur.execute(
+            f"DELETE FROM {SCHEMA}.vm_contacts WHERE user_id=%s AND contact_id=%s",
+            (user_id, contact_id)
+        )
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
 
     # update
     if action == "update":
@@ -153,6 +229,14 @@ def handler(event: dict, context) -> dict:
         cur.close(); conn.close()
         return resp(200, {"ok": True, "user": format_user(row)})
 
+    # remove_avatar — удалить аватарку
+    if action == "remove_avatar":
+        cur.execute(f"UPDATE {SCHEMA}.vm_users SET avatar_url=NULL WHERE id=%s RETURNING id, username, display_name, avatar_color, bio, avatar_url", (user_id,))
+        row = cur.fetchone()
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "user": format_user(row)})
+
     # block
     if action == "block":
         blocked_id = body.get("user_id")
@@ -164,8 +248,43 @@ def handler(event: dict, context) -> dict:
             (user_id, blocked_id)
         )
         conn.commit()
+
+        # Проверяем, заблокирован ли пользователь
+        cur.execute(
+            f"SELECT 1 FROM {SCHEMA}.vm_blocked_users WHERE user_id=%s AND blocked_id=%s",
+            (user_id, blocked_id)
+        )
+        is_blocked = cur.fetchone() is not None
         cur.close(); conn.close()
-        return resp(200, {"ok": True})
+        return resp(200, {"ok": True, "blocked": is_blocked})
+
+    # unblock
+    if action == "unblock":
+        blocked_id = body.get("user_id")
+        if not blocked_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нет user_id"})
+        cur.execute(
+            f"DELETE FROM {SCHEMA}.vm_blocked_users WHERE user_id=%s AND blocked_id=%s",
+            (user_id, blocked_id)
+        )
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "blocked": False})
+
+    # check_blocked — проверить статус блокировки
+    if action == "check_blocked":
+        target_id = int(qs.get("target_id", 0))
+        if not target_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нет target_id"})
+        cur.execute(
+            f"SELECT 1 FROM {SCHEMA}.vm_blocked_users WHERE user_id=%s AND blocked_id=%s",
+            (user_id, target_id)
+        )
+        is_blocked = cur.fetchone() is not None
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "blocked": is_blocked})
 
     cur.close(); conn.close()
     return resp(404, {"error": "Unknown action"})

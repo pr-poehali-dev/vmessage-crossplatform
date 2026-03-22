@@ -1,6 +1,6 @@
 """
 API чатов и сообщений V-message.
-Маршрутизация через ?action=list|create|messages|send|send_media
+Маршрутизация через ?action=list|create|messages|send|send_media|search_public|join_by_invite|set_public|get_invite
 """
 import json
 import os
@@ -29,7 +29,7 @@ def resp(status: int, body: dict) -> dict:
 def get_user_by_token(cur, token: str):
     if not token:
         return None
-    cur.execute(f"SELECT id, username, display_name, avatar_color FROM {SCHEMA}.vm_users WHERE session_token=%s", (token,))
+    cur.execute(f"SELECT id, username, display_name, avatar_color FROM {SCHEMA}.vm_users WHERE session_token=%s AND is_active=TRUE", (token,))
     return cur.fetchone()
 
 
@@ -84,9 +84,14 @@ def handler(event: dict, context) -> dict:
                 u2.avatar_color AS partner_color,
                 u2.username AS partner_username,
                 u2.is_online AS partner_online,
+                u2.is_active AS partner_active,
+                u2.avatar_url AS partner_avatar,
                 (SELECT msg_text FROM {SCHEMA}.vm_messages m WHERE m.chat_id=c.id AND m.is_hidden=FALSE ORDER BY m.created_at DESC LIMIT 1) AS last_msg,
                 (SELECT created_at FROM {SCHEMA}.vm_messages m WHERE m.chat_id=c.id ORDER BY m.created_at DESC LIMIT 1) AS last_time,
-                (SELECT COUNT(*) FROM {SCHEMA}.vm_messages m WHERE m.chat_id=c.id AND m.sender_id != %s AND m.msg_status='sent') AS unread
+                (SELECT COUNT(*) FROM {SCHEMA}.vm_messages m WHERE m.chat_id=c.id AND m.sender_id != %s AND m.msg_status='sent') AS unread,
+                c.is_public,
+                c.invite_code,
+                u2.last_seen AS partner_last_seen
             FROM {SCHEMA}.vm_chats c
             JOIN {SCHEMA}.vm_chat_members cm ON cm.chat_id=c.id AND cm.user_id=%s
             LEFT JOIN {SCHEMA}.vm_chat_members cm2 ON cm2.chat_id=c.id AND cm2.user_id != %s AND c.type='private'
@@ -96,15 +101,34 @@ def handler(event: dict, context) -> dict:
         rows = cur.fetchall()
         chats = []
         for r in rows:
+            is_private = r[1] == "private"
+            partner_active = bool(r[8]) if r[8] is not None else True
+            partner_online = bool(r[7]) if r[7] is not None else False
+
+            if is_private:
+                if not partner_active:
+                    status = "inactive"
+                elif partner_online:
+                    status = "online"
+                else:
+                    status = "offline"
+            else:
+                status = "offline"
+
             chats.append({
                 "id": r[0], "type": r[1],
-                "name": r[4] if r[1] == "private" else r[2],
-                "avatar_color": r[5] if r[1] == "private" else r[3],
+                "name": r[4] if is_private else r[2],
+                "avatar_color": r[5] if is_private else r[3],
                 "username": r[6],
-                "online": bool(r[7]) if r[1] == "private" else False,
-                "last_msg": r[8] or "",
-                "last_time": r[9].strftime("%H:%M") if r[9] else "",
-                "unread": int(r[10]) if r[10] else 0,
+                "online": partner_online if is_private else False,
+                "user_status": status,
+                "avatar_url": r[9] if is_private else None,
+                "last_msg": r[10] or "",
+                "last_time": r[11].strftime("%H:%M") if r[11] else "",
+                "unread": int(r[12]) if r[12] else 0,
+                "is_public": bool(r[13]),
+                "invite_code": r[14],
+                "partner_last_seen": r[15].isoformat() if r[15] else None,
             })
         cur.close()
         conn.close()
@@ -116,7 +140,7 @@ def handler(event: dict, context) -> dict:
         partner_username = body.get("partner_username")
 
         if chat_type == "private" and partner_username:
-            cur.execute(f"SELECT id FROM {SCHEMA}.vm_users WHERE username=%s", (partner_username.lower().strip(),))
+            cur.execute(f"SELECT id, is_active FROM {SCHEMA}.vm_users WHERE username=%s", (partner_username.lower().strip(),))
             partner = cur.fetchone()
             if not partner:
                 cur.close(); conn.close()
@@ -143,25 +167,127 @@ def handler(event: dict, context) -> dict:
 
         if chat_type == "group":
             name = body.get("name", "Группа")
-            cur.execute(f"INSERT INTO {SCHEMA}.vm_chats (type, name, created_by) VALUES ('group', %s, %s) RETURNING id", (name, user_id))
+            is_public = bool(body.get("is_public", False))
+            invite_code = uuid.uuid4().hex[:16]
+            cur.execute(
+                f"INSERT INTO {SCHEMA}.vm_chats (type, name, created_by, is_public, invite_code) VALUES ('group', %s, %s, %s, %s) RETURNING id",
+                (name, user_id, is_public, invite_code)
+            )
             chat_id = cur.fetchone()[0]
             cur.execute(f"INSERT INTO {SCHEMA}.vm_chat_members (chat_id, user_id, role) VALUES (%s, %s, 'admin')", (chat_id, user_id))
             conn.commit()
             cur.close(); conn.close()
-            return resp(200, {"ok": True, "chat_id": chat_id})
+            return resp(200, {"ok": True, "chat_id": chat_id, "invite_code": invite_code})
 
         if chat_type == "channel":
             name = body.get("name", "Канал")
             description = body.get("description", "")
-            cur.execute(f"INSERT INTO {SCHEMA}.vm_chats (type, name, description, created_by) VALUES ('channel', %s, %s, %s) RETURNING id", (name, description, user_id))
+            is_public = bool(body.get("is_public", False))
+            invite_code = uuid.uuid4().hex[:16]
+            cur.execute(
+                f"INSERT INTO {SCHEMA}.vm_chats (type, name, description, created_by, is_public, invite_code) VALUES ('channel', %s, %s, %s, %s, %s) RETURNING id",
+                (name, description, user_id, is_public, invite_code)
+            )
             chat_id = cur.fetchone()[0]
             cur.execute(f"INSERT INTO {SCHEMA}.vm_chat_members (chat_id, user_id, role) VALUES (%s, %s, 'admin')", (chat_id, user_id))
             conn.commit()
             cur.close(); conn.close()
-            return resp(200, {"ok": True, "chat_id": chat_id})
+            return resp(200, {"ok": True, "chat_id": chat_id, "invite_code": invite_code})
 
         cur.close(); conn.close()
         return resp(400, {"error": "Неверные параметры"})
+
+    # join_by_invite — вступить в чат по invite_code
+    if action == "join_by_invite":
+        invite_code = body.get("invite_code", "").strip()
+        if not invite_code:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нет invite_code"})
+
+        cur.execute(f"SELECT id, type, name FROM {SCHEMA}.vm_chats WHERE invite_code=%s", (invite_code,))
+        chat = cur.fetchone()
+        if not chat:
+            cur.close(); conn.close()
+            return resp(404, {"error": "Чат не найден"})
+
+        chat_id = chat[0]
+        cur.execute(f"SELECT 1 FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
+        if not cur.fetchone():
+            cur.execute(f"INSERT INTO {SCHEMA}.vm_chat_members (chat_id, user_id, role) VALUES (%s, %s, 'member')", (chat_id, user_id))
+            conn.commit()
+
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "chat_id": chat_id})
+
+    # search_public — поиск публичных чатов
+    if action == "search_public":
+        q = (qs.get("q") or "").strip()
+        if len(q) < 2:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Минимум 2 символа"})
+        cur.execute(
+            f"""SELECT id, type, name, avatar_color, description, invite_code
+                FROM {SCHEMA}.vm_chats
+                WHERE is_public=TRUE AND name ILIKE %s AND type IN ('group','channel')
+                LIMIT 20""",
+            (f"%{q}%",)
+        )
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "chats": [
+            {"id": r[0], "type": r[1], "name": r[2], "avatar_color": r[3], "description": r[4], "invite_code": r[5]}
+            for r in rows
+        ]})
+
+    # get_invite — получить ссылку приглашения
+    if action == "get_invite":
+        chat_id = int(qs.get("chat_id", 0))
+        cur.execute(f"SELECT invite_code FROM {SCHEMA}.vm_chats WHERE id=%s", (chat_id,))
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if not row:
+            return resp(404, {"error": "Чат не найден"})
+        return resp(200, {"ok": True, "invite_code": row[0]})
+
+    # set_public — сделать чат публичным/закрытым
+    if action == "set_public":
+        chat_id = body.get("chat_id")
+        is_public = bool(body.get("is_public", False))
+        cur.execute(
+            f"UPDATE {SCHEMA}.vm_chats SET is_public=%s WHERE id=%s AND created_by=%s",
+            (is_public, chat_id, user_id)
+        )
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
+
+    # add_member — добавить участника в группу/канал
+    if action == "add_member":
+        chat_id = body.get("chat_id")
+        username = (body.get("username") or "").strip().lower()
+        if not chat_id or not username:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен chat_id и username"})
+
+        cur.execute(f"SELECT id FROM {SCHEMA}.vm_users WHERE username=%s AND is_active=TRUE", (username,))
+        target = cur.fetchone()
+        if not target:
+            cur.close(); conn.close()
+            return resp(404, {"error": "Пользователь не найден"})
+
+        # Проверяем что текущий пользователь — участник чата
+        cur.execute(f"SELECT 1 FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нет доступа"})
+
+        cur.execute(
+            f"INSERT INTO {SCHEMA}.vm_chat_members (chat_id, user_id, role) VALUES (%s, %s, 'member') ON CONFLICT DO NOTHING",
+            (chat_id, target[0])
+        )
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
 
     # messages
     if action == "messages":
@@ -245,9 +371,14 @@ def handler(event: dict, context) -> dict:
             cur.close(); conn.close()
             return resp(403, {"error": "Нет доступа"})
 
-        folder_map = {"voice": "voice", "video_note": "video_notes", "image": "images", "video": "videos", "file": "files"}
+        folder_map = {"voice": "voice", "video_note": "video_notes", "image": "images", "video": "videos", "file": "files", "location": ""}
         folder = folder_map.get(msg_type, "files")
-        media_url = upload_to_s3(data_b64, mime_type, folder)
+
+        if msg_type == "location":
+            # Геолокация не требует S3, данные в тексте (JSON)
+            media_url = None
+        else:
+            media_url = upload_to_s3(data_b64, mime_type, folder)
 
         cur.execute(
             f"INSERT INTO {SCHEMA}.vm_messages (chat_id, sender_id, msg_text, msg_type, msg_status, media_url) VALUES (%s, %s, %s, %s, 'sent', %s) RETURNING id, created_at",
@@ -260,6 +391,36 @@ def handler(event: dict, context) -> dict:
             "id": row[0], "time": row[1].strftime("%H:%M"),
             "text": text, "type": msg_type,
             "status": "sent", "out": True, "media_url": media_url
+        }})
+
+    # send_location — отправить геолокацию как текстовое сообщение
+    if action == "send_location":
+        chat_id = body.get("chat_id")
+        lat = body.get("lat")
+        lon = body.get("lon")
+        address = body.get("address", "")
+
+        if not chat_id or lat is None or lon is None:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен chat_id, lat, lon"})
+
+        cur.execute(f"SELECT 1 FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нет доступа"})
+
+        location_text = json.dumps({"lat": lat, "lon": lon, "address": address})
+        cur.execute(
+            f"INSERT INTO {SCHEMA}.vm_messages (chat_id, sender_id, msg_text, msg_type, msg_status) VALUES (%s, %s, %s, 'location', 'sent') RETURNING id, created_at",
+            (chat_id, user_id, location_text)
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "message": {
+            "id": row[0], "time": row[1].strftime("%H:%M"),
+            "text": location_text, "type": "location",
+            "status": "sent", "out": True
         }})
 
     cur.close(); conn.close()

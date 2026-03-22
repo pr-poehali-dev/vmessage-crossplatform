@@ -31,6 +31,8 @@ export interface User {
   avatar_color: string;
   bio?: string;
   online?: boolean;
+  avatar_url?: string;
+  status?: "online" | "offline" | "inactive";
 }
 
 export interface Chat {
@@ -40,9 +42,14 @@ export interface Chat {
   avatar_color: string;
   username?: string;
   online: boolean;
+  user_status?: "online" | "offline" | "inactive";
+  avatar_url?: string;
   last_msg: string;
   last_time: string;
   unread: number;
+  is_public?: boolean;
+  invite_code?: string;
+  partner_last_seen?: string;
 }
 
 export interface Message {
@@ -95,11 +102,11 @@ export const chatsApi = {
   createPrivate: (partner_username: string) =>
     call(CHATS_URL, "create", "POST", { type: "private", partner_username }),
 
-  createGroup: (name: string) =>
-    call(CHATS_URL, "create", "POST", { type: "group", name }),
+  createGroup: (name: string, is_public = false) =>
+    call(CHATS_URL, "create", "POST", { type: "group", name, is_public }),
 
-  createChannel: (name: string, description: string) =>
-    call(CHATS_URL, "create", "POST", { type: "channel", name, description }),
+  createChannel: (name: string, description: string, is_public = false) =>
+    call(CHATS_URL, "create", "POST", { type: "channel", name, description, is_public }),
 
   messages: (chat_id: number) =>
     call(CHATS_URL, "messages", "GET", undefined, undefined, { chat_id: String(chat_id) }),
@@ -109,6 +116,24 @@ export const chatsApi = {
 
   sendMedia: (chat_id: number, data: string, mime_type: string, msg_type: string, text: string) =>
     call(CHATS_URL, "send_media", "POST", { chat_id, data, mime_type, msg_type, text }),
+
+  sendLocation: (chat_id: number, lat: number, lon: number, address: string) =>
+    call(CHATS_URL, "send_location", "POST", { chat_id, lat, lon, address }),
+
+  searchPublic: (q: string) =>
+    call(CHATS_URL, "search_public", "GET", undefined, undefined, { q }),
+
+  joinByInvite: (invite_code: string) =>
+    call(CHATS_URL, "join_by_invite", "POST", { invite_code }),
+
+  getInvite: (chat_id: number) =>
+    call(CHATS_URL, "get_invite", "GET", undefined, undefined, { chat_id: String(chat_id) }),
+
+  setPublic: (chat_id: number, is_public: boolean) =>
+    call(CHATS_URL, "set_public", "POST", { chat_id, is_public }),
+
+  addMember: (chat_id: number, username: string) =>
+    call(CHATS_URL, "add_member", "POST", { chat_id, username }),
 };
 
 // Users
@@ -118,12 +143,30 @@ export const usersApi = {
 
   contacts: () => call(USERS_URL, "contacts", "GET"),
 
+  addContact: (contact_id: number) =>
+    call(USERS_URL, "add_contact", "POST", { contact_id }),
+
+  removeContact: (contact_id: number) =>
+    call(USERS_URL, "remove_contact", "POST", { contact_id }),
+
   update: (data: { display_name?: string; bio?: string; avatar_color?: string }) =>
     call(USERS_URL, "update", "POST", data),
 
   updateAvatar: (data: string, mime_type: string) =>
     call(USERS_URL, "update_avatar", "POST", { data, mime_type }),
 
+  removeAvatar: () =>
+    call(USERS_URL, "remove_avatar", "POST", {}),
+
   blockUser: (user_id: number) =>
     call(USERS_URL, "block", "POST", { user_id }),
+
+  unblockUser: (user_id: number) =>
+    call(USERS_URL, "unblock", "POST", { user_id }),
+
+  checkBlocked: (target_id: number) =>
+    call(USERS_URL, "check_blocked", "GET", undefined, undefined, { target_id: String(target_id) }),
+
+  setStatus: (online: boolean) =>
+    call(USERS_URL, "set_status", "POST", { online }),
 };
