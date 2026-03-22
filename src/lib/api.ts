@@ -134,6 +134,9 @@ export const chatsApi = {
 
   addMember: (chat_id: number, username: string) =>
     call(CHATS_URL, "add_member", "POST", { chat_id, username }),
+
+  deleteChat: (chat_id: number) =>
+    call(CHATS_URL, "delete_chat", "POST", { chat_id }),
 };
 
 // Users

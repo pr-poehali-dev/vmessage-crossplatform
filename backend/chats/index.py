@@ -423,5 +423,43 @@ def handler(event: dict, context) -> dict:
             "status": "sent", "out": True
         }})
 
+    # delete_chat — удалить приватный чат (для создателя) или покинуть группу/канал
+    if action == "delete_chat":
+        chat_id = body.get("chat_id")
+        if not chat_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нет chat_id"})
+
+        cur.execute(f"SELECT id, type, created_by FROM {SCHEMA}.vm_chats WHERE id=%s", (chat_id,))
+        chat_row = cur.fetchone()
+        if not chat_row:
+            cur.close(); conn.close()
+            return resp(404, {"error": "Чат не найден"})
+
+        chat_id_val, chat_type, created_by = chat_row
+
+        cur.execute(f"SELECT 1 FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id_val, user_id))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нет доступа"})
+
+        if chat_type == "private":
+            # скрываем сообщения и удаляем участника
+            cur.execute(f"UPDATE {SCHEMA}.vm_messages SET is_hidden=TRUE WHERE chat_id=%s", (chat_id_val,))
+            cur.execute(f"DELETE FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id_val, user_id))
+        else:
+            # покидаем группу/канал
+            cur.execute(f"DELETE FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id_val, user_id))
+            # если создатель уходит и участников нет — удаляем чат
+            cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s", (chat_id_val,))
+            count = cur.fetchone()[0]
+            if count == 0:
+                cur.execute(f"DELETE FROM {SCHEMA}.vm_messages WHERE chat_id=%s", (chat_id_val,))
+                cur.execute(f"DELETE FROM {SCHEMA}.vm_chats WHERE id=%s", (chat_id_val,))
+
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
+
     cur.close(); conn.close()
     return resp(404, {"error": "Unknown action"})

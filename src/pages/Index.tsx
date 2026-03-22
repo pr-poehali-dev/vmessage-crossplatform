@@ -231,10 +231,13 @@ function VideoNoteRecorder({ onSend, onCancel }: {
   const mediaRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const secondsRef = useRef(0);
   const MAX = 60;
 
   useEffect(() => {
+    let localStream: MediaStream | null = null;
     navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true }).then(stream => {
+      localStream = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.play();
@@ -242,16 +245,30 @@ function VideoNoteRecorder({ onSend, onCancel }: {
     }).catch(onCancel);
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
-      if (videoRef.current?.srcObject) {
-        (videoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop());
-      }
+      localStream?.getTracks().forEach(t => t.stop());
     };
   }, [onCancel]);
+
+  const stopRec = useCallback(() => {
+    if (!mediaRef.current || mediaRef.current.state === "inactive") return;
+    const dur = secondsRef.current;
+    mediaRef.current.onstop = () => {
+      const blob = new Blob(chunksRef.current, { type: "video/webm" });
+      onSend(blob, dur);
+    };
+    mediaRef.current.stop();
+    if (timerRef.current) clearInterval(timerRef.current);
+  }, [onSend]);
 
   const startRec = () => {
     if (!videoRef.current?.srcObject) return;
     const stream = videoRef.current.srcObject as MediaStream;
-    const mr = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp8,opus" });
+    const opts = MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")
+      ? { mimeType: "video/webm;codecs=vp8,opus" }
+      : MediaRecorder.isTypeSupported("video/webm")
+        ? { mimeType: "video/webm" }
+        : {};
+    const mr = new MediaRecorder(stream, opts);
     mediaRef.current = mr;
     chunksRef.current = [];
     mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
@@ -260,21 +277,12 @@ function VideoNoteRecorder({ onSend, onCancel }: {
     timerRef.current = setInterval(() => {
       setSeconds(s => {
         const ns = s + 1;
+        secondsRef.current = ns;
         setProgress((ns / MAX) * 100);
         if (ns >= MAX) stopRec();
         return ns;
       });
     }, 1000);
-  };
-
-  const stopRec = () => {
-    if (!mediaRef.current || mediaRef.current.state === "inactive") return;
-    mediaRef.current.onstop = () => {
-      const blob = new Blob(chunksRef.current, { type: "video/webm" });
-      onSend(blob, seconds);
-    };
-    mediaRef.current.stop();
-    if (timerRef.current) clearInterval(timerRef.current);
   };
 
   return (
@@ -319,31 +327,41 @@ function VideoNoteRecorder({ onSend, onCancel }: {
 }
 
 // ─── User Profile Modal ───────────────────────────────────────────────────────
-function UserProfileModal({ user, onClose, onStartChat, currentUserId }: {
+function UserProfileModal({ user: initialUser, onClose, onStartChat, currentUserId }: {
   user: User; onClose: () => void;
   onStartChat: (username: string) => void;
   currentUserId: number;
 }) {
+  const [user, setUser] = useState<User>(initialUser);
   const [blocked, setBlocked] = useState(false);
   const [inContacts, setInContacts] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (user.id && user.id !== currentUserId) {
-      Promise.all([
-        usersApi.checkBlocked(user.id),
-        usersApi.contacts(),
-      ]).then(([blockRes, contRes]) => {
+    const loadData = async () => {
+      // если id=0 (открыт из шапки чата) — ищем пользователя по username
+      let resolvedUser = initialUser;
+      if (!initialUser.id && initialUser.username) {
+        const res = await usersApi.search(initialUser.username);
+        if (res.ok && res.users?.length > 0) {
+          resolvedUser = res.users.find((u: User) => u.username === initialUser.username) || initialUser;
+          setUser(resolvedUser);
+        }
+      }
+      if (resolvedUser.id && resolvedUser.id !== currentUserId) {
+        const [blockRes, contRes] = await Promise.all([
+          usersApi.checkBlocked(resolvedUser.id),
+          usersApi.contacts(),
+        ]);
         if (blockRes.ok) setBlocked(blockRes.blocked);
         if (contRes.ok) {
-          setInContacts(contRes.contacts.some((c: User) => c.id === user.id));
+          setInContacts(contRes.contacts.some((c: User) => c.id === resolvedUser.id));
         }
-        setLoading(false);
-      });
-    } else {
+      }
       setLoading(false);
-    }
-  }, [user.id, currentUserId]);
+    };
+    loadData();
+  }, [initialUser, currentUserId]);
 
   const toggleBlock = async () => {
     if (blocked) {
@@ -985,7 +1003,7 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
 
   return (
     <div className="flex flex-col h-full overflow-y-auto vm-scrollbar">
-      <div className="relative vm-gradient-bg pt-10 pb-16 px-6 flex-shrink-0">
+      <div className="relative vm-gradient-bg pt-10 pb-6 px-6 flex-shrink-0">
         <div className="absolute inset-0 opacity-20" style={{ backgroundImage: "radial-gradient(circle at 30% 50%, white 0%, transparent 60%)" }} />
         <div className="relative flex flex-col items-center">
           <div className="relative animate-float">
@@ -1038,8 +1056,8 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
         </div>
       )}
 
-      {/* Color picker */}
-      <div className={`mx-4 ${showAvatarMenu ? "mt-3" : "-mt-6"} bg-card rounded-3xl p-4 shadow-lg flex-shrink-0`}>
+      {/* Color picker — всегда виден под аватар-меню */}
+      <div className="mx-4 mt-3 bg-card rounded-3xl p-4 shadow-lg flex-shrink-0">
         <div className="text-xs text-muted-foreground mb-2">Цвет профиля</div>
         <div className="flex gap-2 flex-wrap">
           {COLORS.map(color => (
@@ -1047,7 +1065,7 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
               const res = await usersApi.update({ avatar_color: color });
               if (res.ok) onUpdate(res.user);
             }}
-              className={`w-9 h-9 rounded-full transition-all duration-200 ${me.avatar_color === color ? "ring-2 ring-offset-2 ring-violet-500 scale-110" : "hover:scale-105"}`}
+              className={`w-9 h-9 rounded-full transition-all duration-200 flex-shrink-0 ${me.avatar_color === color ? "ring-2 ring-offset-2 ring-violet-500 scale-110" : "hover:scale-105"}`}
               style={{ background: color }} />
           ))}
         </div>
@@ -1222,15 +1240,17 @@ function CallsSection() {
 }
 
 // ─── Chat View ────────────────────────────────────────────────────────────────
-function ChatView({ chat, me, onBack, onStartChat, onOpenProfile }: {
+function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }: {
   chat: Chat; me: User; onBack: () => void;
   onStartChat: (u: string) => void;
   onOpenProfile: (user: User) => void;
+  onDeleteChat: (chatId: number) => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(true);
   const [showEmoji, setShowEmoji] = useState(false);
+  const [showChatMenu, setShowChatMenu] = useState(false);
   const [recordMode, setRecordMode] = useState<"voice" | "video">("voice");
   const [recording, setRecording] = useState(false);
   const [showVideoNote, setShowVideoNote] = useState(false);
@@ -1267,9 +1287,19 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile }: {
                 silent: false,
               });
               setTimeout(() => notif.close(), 4000);
-              const audio = new Audio("data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2ozFS9loNXXqFkuFCxXl8TMmVAnEiVKir+9k0ggDR41b6ivlk8aDRYoVIuvqoVMGwsQHkJxoqCCTRoOFR8+bZqafEkXCxAeP22ZmnlIFgsNHDpslZV1RxQKCxo3aJCQcEQRCQkXNG2LjWxDEAcIFTFqioplQA4GB1EuaYiIZ0AOBgZRLmiHiGdADgUFTCtlhIVjPQ0FBU0raYKCXzsLBANLKmaAgFw5CgQCS");
-              audio.volume = 0.5;
-              audio.play().catch(() => {});
+              try {
+                const ctx = new AudioContext();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.frequency.value = 880;
+                osc.type = "sine";
+                gain.gain.setValueAtTime(0.3, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+                osc.start(ctx.currentTime);
+                osc.stop(ctx.currentTime + 0.3);
+              } catch (_e) { void _e; }
             }
           });
         }
@@ -1297,6 +1327,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile }: {
     const text = input.trim();
     if (!text) return;
     setInput("");
+    setTimeout(() => inputRef.current?.focus(), 50);
     const res = await chatsApi.send(chat.id, text);
     if (res.ok) {
       setMessages(m => [...m, {
@@ -1368,6 +1399,12 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile }: {
     if (res.ok) { setInviteCode(res.invite_code); setShowInvite(true); }
   };
 
+  const handleDeleteChat = async () => {
+    if (!confirm(chat.type === "private" ? "Удалить чат?" : "Покинуть группу/канал?")) return;
+    const res = await chatsApi.deleteChat(chat.id);
+    if (res.ok) onDeleteChat(chat.id);
+  };
+
   // Переключение режима голос/видео коротким тапом на кнопку микрофона
   const handleMicTap = () => {
     setRecordMode(m => m === "voice" ? "video" : "voice");
@@ -1399,8 +1436,8 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile }: {
           <div className="flex flex-col items-center gap-1">
             <div className="w-28 h-28 rounded-full overflow-hidden border-4 border-white dark:border-gray-700 shadow-lg relative">
               {hasMedia ? (
-                <video src={m.media_url} className="w-full h-full object-cover"
-                  onClick={e => { const v = e.target as HTMLVideoElement; if (v.paused) { v.play(); } else { v.pause(); } }} />
+                <video src={m.media_url} className="w-full h-full object-cover" controls playsInline
+                  style={{ borderRadius: "50%" }} />
               ) : (
                 <div className="w-full h-full flex items-center justify-center bg-violet-100 dark:bg-violet-900">
                   <Icon name="Video" size={32} className="text-violet-500" />
@@ -1420,25 +1457,20 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile }: {
     }
 
     if (isVoice) {
-      const playVoice = () => {
-        if (hasMedia) {
-          const a = new Audio(m.media_url);
-          a.play();
-        }
-      };
       return (
         <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
-          <div className={`flex items-center gap-3 px-4 py-3 rounded-2xl max-w-[220px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
-            <button onClick={playVoice} className={`w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 ${m.out ? "bg-white/20" : "bg-violet-100 dark:bg-violet-900"}`}>
-              <Icon name="Play" size={16} className={m.out ? "text-white" : "text-violet-500"} />
-            </button>
+          <div className={`flex items-center gap-3 px-4 py-3 rounded-2xl max-w-[240px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
             <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-0.5 h-5">
-                {[...Array(12)].map((_, i) => (
-                  <div key={i} className={`w-1 rounded-full ${m.out ? "bg-white/60" : "bg-violet-300"}`}
-                    style={{ height: `${30 + Math.sin(i * 1.3) * 50}%` }} />
-                ))}
-              </div>
+              {hasMedia ? (
+                <audio src={m.media_url} controls className="w-full h-8" style={{ minWidth: 180 }} />
+              ) : (
+                <div className="flex items-center gap-0.5 h-5">
+                  {[...Array(12)].map((_, i) => (
+                    <div key={i} className={`w-1 rounded-full ${m.out ? "bg-white/60" : "bg-violet-300"}`}
+                      style={{ height: `${30 + Math.sin(i * 1.3) * 50}%` }} />
+                  ))}
+                </div>
+              )}
               <div className={`text-[10px] mt-0.5 ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
                 {m.text?.replace("🎤 Голосовое ", "") || "0с"} · {m.time}
                 {m.out && " "}
@@ -1605,7 +1637,23 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile }: {
             </button>
           </>
         )}
+        {/* Chat menu */}
+        <div className="relative">
+          <button onClick={() => setShowChatMenu(v => !v)} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground">
+            <Icon name="MoreVertical" size={18} />
+          </button>
+          {showChatMenu && (
+            <div className="absolute right-0 top-full mt-1 bg-card rounded-2xl shadow-2xl border border-border p-1 z-50 min-w-[160px] animate-scale-in">
+              <button onClick={() => { setShowChatMenu(false); handleDeleteChat(); }}
+                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-red-50 dark:hover:bg-red-900/20 text-red-500 text-sm transition-colors">
+                <Icon name={chat.type === "private" ? "Trash2" : "LogOut"} size={16} />
+                {chat.type === "private" ? "Удалить чат" : "Покинуть"}
+              </button>
+            </div>
+          )}
+        </div>
       </div>
+      {showChatMenu && <div className="fixed inset-0 z-40" onClick={() => setShowChatMenu(false)} />}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto vm-scrollbar vm-chat-bg px-4 py-4 space-y-2">
@@ -1855,6 +1903,7 @@ export default function Index() {
             onBack={() => setOpenChat(null)}
             onStartChat={handleStartChatWith}
             onOpenProfile={openProfile}
+            onDeleteChat={(id) => { setChats(cs => cs.filter(c => c.id !== id)); setOpenChat(null); }}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center">
@@ -1877,6 +1926,7 @@ export default function Index() {
             onBack={() => setOpenChat(null)}
             onStartChat={handleStartChatWith}
             onOpenProfile={openProfile}
+            onDeleteChat={(id) => { setChats(cs => cs.filter(c => c.id !== id)); setOpenChat(null); }}
           />
         ) : (
           <>
