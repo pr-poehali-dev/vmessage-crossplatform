@@ -29,13 +29,12 @@ const VoiceMessage = ({ mediaUrl, dur, time, isOut, status }: VoiceMessageProps)
       audio.pause();
       setPlaying(false);
     } else {
-      if (audio.ended || progress >= 99.9) {
+      if (audio.ended || audio.currentTime >= (audio.duration || Infinity) - 0.1 || progress >= 99) {
         audio.currentTime = 0;
         setProgress(0);
         setCurrentTime(0);
       }
-      const p = audio.play();
-      if (p) p.then(() => setPlaying(true)).catch(() => setPlaying(false));
+      audio.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
     }
   };
 
@@ -285,27 +284,29 @@ function VoiceRecorder({ onSend, onCancel }: {
       const mr = new MediaRecorder(stream, opts);
       mrRef.current = mr;
       mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
-      // iOS: start без timeslice, собираем данные через requestData по таймеру
+
+      const startedAt = performance.now();
+      const tick = () => {
+        if (!isMountedRef.current) return;
+        const elapsed = Math.floor((performance.now() - startedAt) / 1000);
+        durRef.current = elapsed;
+        setSeconds(elapsed);
+        if (isIOS && mr.state === "recording") {
+          try { mr.requestData(); } catch (_) { /* ok */ }
+        }
+        timerRef.current = setTimeout(tick, 1000 - ((performance.now() - startedAt) % 1000)) as unknown as ReturnType<typeof setInterval>;
+      };
+
       if (isIOS) {
         mr.start();
-        timerRef.current = setInterval(() => {
-          durRef.current += 1;
-          setSeconds(durRef.current);
-          if (mr.state === "recording") {
-            try { mr.requestData(); } catch (_) { /* ok */ }
-          }
-        }, 1000);
       } else {
-        mr.start(1000);
-        timerRef.current = setInterval(() => {
-          durRef.current += 1;
-          setSeconds(durRef.current);
-        }, 1000);
+        mr.start(250);
       }
+      timerRef.current = setTimeout(tick, 1000) as unknown as ReturnType<typeof setInterval>;
     }).catch(() => { if (isMountedRef.current) onCancel(); });
     return () => {
       isMountedRef.current = false;
-      if (timerRef.current) clearInterval(timerRef.current);
+      if (timerRef.current) clearTimeout(timerRef.current as unknown as ReturnType<typeof setTimeout>);
       if (mrRef.current && mrRef.current.state !== "inactive") {
         mrRef.current.onstop = null;
         try { mrRef.current.stop(); } catch (_) { /* ok */ }
@@ -317,7 +318,7 @@ function VoiceRecorder({ onSend, onCancel }: {
   const stop = async () => {
     const mr = mrRef.current;
     if (!mr || mr.state === "inactive") return;
-    if (timerRef.current) clearInterval(timerRef.current);
+    if (timerRef.current) clearTimeout(timerRef.current as unknown as ReturnType<typeof setTimeout>);
     const dur = durRef.current;
     const mimeType = mr.mimeType || "audio/mp4";
 
