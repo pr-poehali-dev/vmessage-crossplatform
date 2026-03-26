@@ -273,10 +273,15 @@ function VoiceRecorder({ onSend, onCancel }: {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const animFrameRef = useRef<number>(0);
   const analyserRef = useRef<AnalyserNode | null>(null);
-  const isMountedRef = useRef(true);
+  // Храним колбэки в рефах чтобы useEffect не перезапускался при их смене
+  const onCancelRef = useRef(onCancel);
+  const onSendRef = useRef(onSend);
+  useEffect(() => { onCancelRef.current = onCancel; }, [onCancel]);
+  useEffect(() => { onSendRef.current = onSend; }, [onSend]);
 
   useEffect(() => {
-    isMountedRef.current = true;
+    let alive = true;
+
     const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
       (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
     const mimeTypes = isIOS
@@ -284,8 +289,8 @@ function VoiceRecorder({ onSend, onCancel }: {
       : ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4", ""];
     const mimeType = mimeTypes.find(t => !t || MediaRecorder.isTypeSupported(t)) ?? "";
 
-    navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 44100 } }).then(stream => {
-      if (!isMountedRef.current) { stream.getTracks().forEach(t => t.stop()); return; }
+    navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }).then(stream => {
+      if (!alive) { stream.getTracks().forEach(t => t.stop()); return; }
       streamRef.current = stream;
 
       // AnalyserNode для визуализации уровня звука
@@ -300,10 +305,10 @@ function VoiceRecorder({ onSend, onCancel }: {
 
         const data = new Uint8Array(analyser.frequencyBinCount);
         const drawBars = () => {
-          if (!isMountedRef.current) return;
+          if (!alive) return;
           analyser.getByteFrequencyData(data);
           const count = 20;
-          const step = Math.floor(data.length / count);
+          const step = Math.max(1, Math.floor(data.length / count));
           const newBars = Array.from({ length: count }, (_, i) => {
             const val = data[i * step] ?? 0;
             return Math.max(3, Math.round((val / 255) * 24));
@@ -317,28 +322,24 @@ function VoiceRecorder({ onSend, onCancel }: {
       const opts = mimeType ? { mimeType } : {};
       const mr = new MediaRecorder(stream, opts);
       mrRef.current = mr;
-      mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      chunksRef.current = [];
+      mr.ondataavailable = e => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data); };
 
-      // Запускаем запись — timeslice только для не-iOS
-      if (isIOS) {
-        mr.start();
-      } else {
-        mr.start(100);
-      }
+      // Стартуем без timeslice — данные соберём через requestData при остановке
+      mr.start();
 
-      // Стартуем таймер ПОСЛЕ mr.start() чтобы время было точным
+      // Таймер строго после mr.start()
       startedAtRef.current = Date.now();
       timerRef.current = setInterval(() => {
-        if (!isMountedRef.current) return;
-        const s = Math.floor((Date.now() - startedAtRef.current) / 1000);
-        setSeconds(s);
+        if (!alive) return;
+        setSeconds(Math.floor((Date.now() - startedAtRef.current) / 1000));
       }, 1000);
-    }).catch(() => { if (isMountedRef.current) onCancel(); });
+    }).catch(() => { if (alive) onCancelRef.current(); });
 
     return () => {
-      isMountedRef.current = false;
-      if (timerRef.current) clearInterval(timerRef.current);
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      alive = false;
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+      if (animFrameRef.current) { cancelAnimationFrame(animFrameRef.current); animFrameRef.current = 0; }
       if (mrRef.current && mrRef.current.state !== "inactive") {
         mrRef.current.onstop = null;
         try { mrRef.current.stop(); } catch (_) { /* ok */ }
@@ -346,7 +347,8 @@ function VoiceRecorder({ onSend, onCancel }: {
       streamRef.current?.getTracks().forEach(t => t.stop());
       analyserRef.current?.context.close().catch(() => {});
     };
-  }, [onCancel]);
+   
+  }, []);
 
   const stop = async () => {
     const mr = mrRef.current;
@@ -368,7 +370,7 @@ function VoiceRecorder({ onSend, onCancel }: {
     const blob = new Blob(chunksRef.current, { type: mimeType });
     streamRef.current?.getTracks().forEach(t => t.stop());
     analyserRef.current?.context.close().catch(() => {});
-    onSend(blob, Math.max(1, dur));
+    onSendRef.current(blob, Math.max(1, dur));
   };
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
