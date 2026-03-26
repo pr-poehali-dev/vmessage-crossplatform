@@ -37,11 +37,13 @@ const VoiceMessage = ({ mediaUrl, dur, time, isOut, status }: VoiceMessageProps)
     } else {
       if (endedRef.current) {
         endedRef.current = false;
-        audio.currentTime = 0;
         setProgress(0);
         setCurrentTime(0);
+        audio.addEventListener("seeked", () => audio.play().catch(() => {}), { once: true });
+        audio.currentTime = 0;
+      } else {
+        audio.play().catch(() => {});
       }
-      audio.play().catch(() => {});
     }
   };
 
@@ -180,7 +182,7 @@ function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void })
   };
 
   return (
-    <div className="h-screen flex items-center justify-center vm-chat-bg p-4">
+    <div className="flex items-center justify-center vm-chat-bg p-4" style={{ height: "100dvh" }}>
       <div className="w-full max-w-sm animate-scale-in">
         <div className="flex flex-col items-center mb-8">
           <div className="w-20 h-20 rounded-3xl vm-gradient-bg flex items-center justify-center mb-4 shadow-2xl shadow-violet-500/30 animate-float">
@@ -317,19 +319,20 @@ function VoiceRecorder({ onSend, onCancel }: {
       mrRef.current = mr;
       mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
 
-      startedAtRef.current = Date.now();
-      // Точный таймер через setInterval — не влияет на запись
-      timerRef.current = setInterval(() => {
-        if (!isMountedRef.current) return;
-        setSeconds(Math.floor((Date.now() - startedAtRef.current) / 1000));
-      }, 500);
-
       // Запускаем запись — timeslice только для не-iOS
       if (isIOS) {
         mr.start();
       } else {
         mr.start(100);
       }
+
+      // Стартуем таймер ПОСЛЕ mr.start() чтобы время было точным
+      startedAtRef.current = Date.now();
+      timerRef.current = setInterval(() => {
+        if (!isMountedRef.current) return;
+        const s = Math.floor((Date.now() - startedAtRef.current) / 1000);
+        setSeconds(s);
+      }, 1000);
     }).catch(() => { if (isMountedRef.current) onCancel(); });
 
     return () => {
@@ -2436,12 +2439,14 @@ export default function Index() {
   if (!me) return <AuthScreen onAuth={(_, user) => setMe(user)} />;
 
   const totalUnread = chats.reduce((s, c) => s + (c.unread || 0), 0);
-  const isChatOpen = activeTab === "chats" && openChat;
+  const isChatOpen = !!openChat;
 
   const openProfile = (user: User) => setProfileUser(user);
 
+  const handleOpenChat = (c: Chat) => { setOpenChat(c); setActiveTab("chats"); };
+
   const leftPanel: Record<string, React.ReactNode> = {
-    chats: <ChatList chats={chats} loading={chatsLoading} onOpen={c => setOpenChat(c)} onNew={() => setShowNewChat(true)} />,
+    chats: <ChatList chats={chats} loading={chatsLoading} onOpen={handleOpenChat} onNew={() => setShowNewChat(true)} />,
     contacts: <ContactsSection me={me} onStartChat={u => { handleStartChatWith(u); setActiveTab("chats"); }} onOpenProfile={openProfile} />,
     calls: <CallsSection />,
     profile: <ProfileSection me={me} onUpdate={u => { setMe(u); saveSession(getToken()!, u); }} onLogout={handleLogout} />,
@@ -2449,7 +2454,7 @@ export default function Index() {
   };
 
   return (
-    <div className="h-screen flex flex-col md:flex-row overflow-hidden bg-background font-golos">
+    <div className="flex flex-col md:flex-row overflow-hidden bg-background font-golos" style={{ height: "100dvh" }}>
       {/* Входящий звонок */}
       {incomingCall && !activeCall && (
         <IncomingCallModal
