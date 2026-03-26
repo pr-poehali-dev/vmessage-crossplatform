@@ -21,35 +21,38 @@ const VoiceMessage = ({ mediaUrl, dur, time, isOut, status }: VoiceMessageProps)
   const [progress, setProgress] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(dur);
+  const endedRef = useRef(false);
+
+  const fmt = (s: number) => {
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60);
+    return `${m}:${sec.toString().padStart(2, "0")}`;
+  };
 
   const toggle = () => {
     const audio = audioRef.current;
     if (!audio) return;
     if (playing) {
       audio.pause();
-      setPlaying(false);
     } else {
-      if (audio.ended || audio.currentTime >= (audio.duration || Infinity) - 0.1 || progress >= 99) {
+      if (endedRef.current) {
+        endedRef.current = false;
         audio.currentTime = 0;
         setProgress(0);
         setCurrentTime(0);
       }
-      audio.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+      audio.play().catch(() => {});
     }
   };
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
     const audio = audioRef.current;
-    if (!audio) return;
+    if (!audio || !audio.duration) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    const ratio = (e.clientX - rect.left) / rect.width;
-    audio.currentTime = ratio * (audio.duration || 0);
-  };
-
-  const fmt = (s: number) => {
-    const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
-    return `${m}:${sec.toString().padStart(2, "0")}`;
+    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    endedRef.current = false;
+    audio.currentTime = ratio * audio.duration;
+    if (!playing) audio.play().catch(() => {});
   };
 
   return (
@@ -62,16 +65,15 @@ const VoiceMessage = ({ mediaUrl, dur, time, isOut, status }: VoiceMessageProps)
         onTimeUpdate={e => {
           const a = e.currentTarget;
           setCurrentTime(a.currentTime);
-          setProgress((a.currentTime / (a.duration || 1)) * 100);
+          setProgress(a.duration ? (a.currentTime / a.duration) * 100 : 0);
         }}
         onEnded={() => {
+          endedRef.current = true;
           setPlaying(false);
-          setProgress(0);
-          setCurrentTime(0);
-          if (audioRef.current) audioRef.current.currentTime = 0;
+          setProgress(100);
         }}
         onPause={() => setPlaying(false)}
-        onPlay={() => setPlaying(true)}
+        onPlay={() => { endedRef.current = false; setPlaying(true); }}
       />
       <button
         className="w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center vm-gradient-bg text-white"
@@ -84,7 +86,7 @@ const VoiceMessage = ({ mediaUrl, dur, time, isOut, status }: VoiceMessageProps)
           className="relative h-1.5 bg-white/20 rounded-full overflow-hidden cursor-pointer"
           onClick={handleSeek}
         >
-          <div className="h-full bg-white/70 rounded-full" style={{ width: `${progress}%` }} />
+          <div className="h-full bg-white/70 rounded-full transition-none" style={{ width: `${progress}%` }} />
         </div>
         <div className={`text-[10px] mt-1 flex items-center justify-between ${isOut ? "text-white/60" : "text-muted-foreground"}`}>
           <span>{playing ? fmt(currentTime) : (duration ? `${duration}с` : "голосовое")}</span>
@@ -261,68 +263,96 @@ function VoiceRecorder({ onSend, onCancel }: {
   onCancel: () => void;
 }) {
   const [seconds, setSeconds] = useState(0);
+  const [bars, setBars] = useState<number[]>(Array(20).fill(3));
   const mrRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const startedAtRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const durRef = useRef(0);
+  const animFrameRef = useRef<number>(0);
+  const analyserRef = useRef<AnalyserNode | null>(null);
   const isMountedRef = useRef(true);
 
   useEffect(() => {
     isMountedRef.current = true;
-    // iOS Safari поддерживает только audio/mp4, остальные браузеры — webm/opus
-    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
     const mimeTypes = isIOS
       ? ["audio/mp4", "audio/aac", ""]
       : ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4", ""];
     const mimeType = mimeTypes.find(t => !t || MediaRecorder.isTypeSupported(t)) ?? "";
 
-    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 44100 } }).then(stream => {
       if (!isMountedRef.current) { stream.getTracks().forEach(t => t.stop()); return; }
       streamRef.current = stream;
+
+      // AnalyserNode для визуализации уровня звука
+      try {
+        const ctx = new AudioContext();
+        const src = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 64;
+        analyser.smoothingTimeConstant = 0.7;
+        src.connect(analyser);
+        analyserRef.current = analyser;
+
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        const drawBars = () => {
+          if (!isMountedRef.current) return;
+          analyser.getByteFrequencyData(data);
+          const count = 20;
+          const step = Math.floor(data.length / count);
+          const newBars = Array.from({ length: count }, (_, i) => {
+            const val = data[i * step] ?? 0;
+            return Math.max(3, Math.round((val / 255) * 24));
+          });
+          setBars(newBars);
+          animFrameRef.current = requestAnimationFrame(drawBars);
+        };
+        animFrameRef.current = requestAnimationFrame(drawBars);
+      } catch (_) { /* AudioContext недоступен */ }
+
       const opts = mimeType ? { mimeType } : {};
       const mr = new MediaRecorder(stream, opts);
       mrRef.current = mr;
       mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
 
-      const startedAt = performance.now();
-      const tick = () => {
+      startedAtRef.current = Date.now();
+      // Точный таймер через setInterval — не влияет на запись
+      timerRef.current = setInterval(() => {
         if (!isMountedRef.current) return;
-        const elapsed = Math.floor((performance.now() - startedAt) / 1000);
-        durRef.current = elapsed;
-        setSeconds(elapsed);
-        if (isIOS && mr.state === "recording") {
-          try { mr.requestData(); } catch (_) { /* ok */ }
-        }
-        timerRef.current = setTimeout(tick, 1000 - ((performance.now() - startedAt) % 1000)) as unknown as ReturnType<typeof setInterval>;
-      };
+        setSeconds(Math.floor((Date.now() - startedAtRef.current) / 1000));
+      }, 500);
 
+      // Запускаем запись — timeslice только для не-iOS
       if (isIOS) {
         mr.start();
       } else {
-        mr.start(250);
+        mr.start(100);
       }
-      timerRef.current = setTimeout(tick, 1000) as unknown as ReturnType<typeof setInterval>;
     }).catch(() => { if (isMountedRef.current) onCancel(); });
+
     return () => {
       isMountedRef.current = false;
-      if (timerRef.current) clearTimeout(timerRef.current as unknown as ReturnType<typeof setTimeout>);
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
       if (mrRef.current && mrRef.current.state !== "inactive") {
         mrRef.current.onstop = null;
         try { mrRef.current.stop(); } catch (_) { /* ok */ }
       }
       streamRef.current?.getTracks().forEach(t => t.stop());
+      analyserRef.current?.context.close().catch(() => {});
     };
   }, [onCancel]);
 
   const stop = async () => {
     const mr = mrRef.current;
     if (!mr || mr.state === "inactive") return;
-    if (timerRef.current) clearTimeout(timerRef.current as unknown as ReturnType<typeof setTimeout>);
-    const dur = durRef.current;
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    const dur = Math.floor((Date.now() - startedAtRef.current) / 1000);
     const mimeType = mr.mimeType || "audio/mp4";
 
-    // Запрашиваем последние данные, затем ждём stop
     const collected = new Promise<void>(resolve => {
       mr.addEventListener("stop", resolve, { once: true });
     });
@@ -334,19 +364,23 @@ function VoiceRecorder({ onSend, onCancel }: {
 
     const blob = new Blob(chunksRef.current, { type: mimeType });
     streamRef.current?.getTracks().forEach(t => t.stop());
-    onSend(blob, dur);
+    analyserRef.current?.context.close().catch(() => {});
+    onSend(blob, Math.max(1, dur));
   };
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
   return (
     <div className="flex items-center gap-2 bg-red-50 dark:bg-red-900/20 rounded-2xl px-3 py-2.5">
-      <div className="w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse flex-shrink-0" />
-      <span className="text-red-500 font-mono text-sm font-semibold flex-1">{fmt(seconds)}</span>
-      <div className="flex items-center gap-1 flex-shrink-0">
-        {[...Array(5)].map((_, i) => (
-          <div key={i} className="w-0.5 bg-red-400 rounded-full animate-pulse"
-            style={{ height: `${6 + Math.abs(Math.sin(i * 1.2 + seconds)) * 10}px`, animationDelay: `${i * 0.1}s` }} />
+      <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse flex-shrink-0" />
+      <span className="text-red-500 font-mono text-sm font-semibold w-10 flex-shrink-0">{fmt(seconds)}</span>
+      <div className="flex items-end gap-px flex-1 h-6 overflow-hidden">
+        {bars.map((h, i) => (
+          <div
+            key={i}
+            className="flex-1 bg-red-400 rounded-sm"
+            style={{ height: `${h}px`, transition: "height 80ms ease" }}
+          />
         ))}
       </div>
       <button onClick={onCancel} className="p-1.5 rounded-xl hover:bg-red-100 dark:hover:bg-red-900/40 text-muted-foreground flex-shrink-0">
@@ -1098,7 +1132,7 @@ function ChatList({ chats, loading, onOpen, onNew }: {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="p-4 pb-2">
+      <div className="p-4 pb-2 safe-area-top">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-lg font-bold">Чаты</h2>
           <button onClick={onNew} className="p-2 rounded-xl vm-gradient-bg text-white hover:opacity-90 transition-opacity shadow-lg shadow-violet-500/30">
@@ -1405,7 +1439,7 @@ function ContactsSection({ me, onStartChat, onOpenProfile }: {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="p-4 pb-2">
+      <div className="p-4 pb-2 safe-area-top">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-lg font-bold">Контакты</h2>
         </div>
@@ -1495,7 +1529,7 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
 
   return (
     <div className="flex flex-col h-full overflow-y-auto vm-scrollbar">
-      <div className="relative vm-gradient-bg pt-10 pb-6 px-6 flex-shrink-0">
+      <div className="relative vm-gradient-bg pt-10 pb-6 px-6 flex-shrink-0 safe-area-top">
         <div className="absolute inset-0 opacity-20" style={{ backgroundImage: "radial-gradient(circle at 30% 50%, white 0%, transparent 60%)" }} />
         <div className="relative flex flex-col items-center">
           <div className="relative animate-float">
@@ -1653,7 +1687,7 @@ function SettingsSection() {
   return (
     <div className="flex flex-col h-full overflow-y-auto vm-scrollbar pb-4">
       {showSessions && <ActiveSessionsModal onClose={() => setShowSessions(false)} />}
-      <div className="p-4 pb-2"><h2 className="text-lg font-bold">Настройки</h2></div>
+      <div className="p-4 pb-2 safe-area-top"><h2 className="text-lg font-bold">Настройки</h2></div>
       {[
         {
           title: "Внешний вид",
@@ -1720,7 +1754,7 @@ function SettingsSection() {
 function CallsSection() {
   return (
     <div className="flex flex-col h-full">
-      <div className="p-4"><h2 className="text-lg font-bold">Звонки</h2></div>
+      <div className="p-4 safe-area-top"><h2 className="text-lg font-bold">Звонки</h2></div>
       <div className="flex-1 flex items-center justify-center text-center px-6">
         <div>
           <div className="text-4xl mb-3">📞</div>
@@ -1751,6 +1785,9 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
   const [showInvite, setShowInvite] = useState(false);
   const [inviteCode, setInviteCode] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const [showScrollDown, setShowScrollDown] = useState(false);
+  const isAtBottomRef = useRef(true);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
@@ -1812,7 +1849,9 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
   }, [loadMessages]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (isAtBottomRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages]);
 
   const send = async () => {
@@ -2101,7 +2140,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
       )}
 
       {/* Header */}
-      <div className="vm-glass border-b flex items-center gap-3 px-4 py-3 flex-shrink-0">
+      <div className="vm-glass border-b flex items-center gap-3 px-4 py-3 flex-shrink-0 safe-area-top">
         <button onClick={onBack} className="p-2 rounded-xl hover:bg-secondary transition-colors">
           <Icon name="ChevronLeft" size={20} />
         </button>
@@ -2152,7 +2191,16 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
       {showChatMenu && <div className="fixed inset-0 z-40" onClick={() => setShowChatMenu(false)} />}
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto vm-scrollbar vm-chat-bg px-4 py-4 space-y-2">
+      <div
+        ref={messagesContainerRef}
+        className="flex-1 overflow-y-auto vm-scrollbar vm-chat-bg px-4 py-4 space-y-2 relative"
+        onScroll={e => {
+          const el = e.currentTarget;
+          const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+          isAtBottomRef.current = distFromBottom < 80;
+          setShowScrollDown(distFromBottom > 200);
+        }}
+      >
         <div className="flex items-center justify-center my-3">
           <span className="bg-black/10 dark:bg-white/10 backdrop-blur-md text-xs px-3 py-1 rounded-full text-foreground/60">Сегодня</span>
         </div>
@@ -2168,6 +2216,14 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
         ))}
         <div ref={bottomRef} />
       </div>
+      {showScrollDown && (
+        <button
+          onClick={() => { isAtBottomRef.current = true; bottomRef.current?.scrollIntoView({ behavior: "smooth" }); setShowScrollDown(false); }}
+          className="absolute bottom-20 right-4 z-10 w-9 h-9 rounded-full vm-glass border shadow-lg flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <Icon name="ChevronDown" size={18} />
+        </button>
+      )}
 
       {/* Input */}
       <div className="vm-glass border-t px-2 py-2 flex-shrink-0">
