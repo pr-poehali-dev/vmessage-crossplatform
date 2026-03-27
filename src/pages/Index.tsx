@@ -415,12 +415,13 @@ function VideoNoteRecorder({ onSend, onCancel }: {
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const durRef = useRef(0);
-  const stoppedRef = useRef(false); // предотвращает двойную остановку
+  const sendingRef = useRef(false); // предотвращает двойную остановку
   const MAX = 60;
-
-  const stopStream = useCallback(() => {
-    streamRef.current?.getTracks().forEach(t => t.stop());
-  }, []);
+  // Колбэки в рефах — useEffect не перезапускается при их смене
+  const onSendRef = useRef(onSend);
+  const onCancelRef = useRef(onCancel);
+  useEffect(() => { onSendRef.current = onSend; }, [onSend]);
+  useEffect(() => { onCancelRef.current = onCancel; }, [onCancel]);
 
   useEffect(() => {
     navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true })
@@ -434,39 +435,42 @@ function VideoNoteRecorder({ onSend, onCancel }: {
       })
       .catch(() => setError("Нет доступа к камере/микрофону"));
     return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-      // Cleanup только если stopRec ещё не запустился
-      if (!stoppedRef.current) {
-        stopStream();
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+      // Стопаем стрим только если отправка ещё не началась (stopRec сам остановит стрим)
+      if (!sendingRef.current) {
+        streamRef.current?.getTracks().forEach(t => t.stop());
         const mr = mrRef.current;
         if (mr && mr.state !== "inactive") {
-          mr.onstop = null; // важно — убираем обработчик чтобы не вызвать onSend
+          mr.ondataavailable = null;
+          mr.onstop = null;
           try { mr.stop(); } catch (_) { /* ok */ }
         }
       }
     };
-  }, [stopStream]);
+   
+  }, []);
 
   const stopRec = useCallback(async () => {
     const mr = mrRef.current;
-    if (!mr || mr.state !== "recording" || stoppedRef.current) return;
-    stoppedRef.current = true;
-    if (timerRef.current) clearInterval(timerRef.current);
+    if (!mr || mr.state !== "recording" || sendingRef.current) return;
+    sendingRef.current = true;
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     const dur = durRef.current;
     const mimeType = mr.mimeType || "video/webm";
     setSending(true);
 
-    // Ждём все чанки через Promise
+    // Запрашиваем финальный чанк и ждём событие stop
     const collected = new Promise<void>(resolve => {
       mr.addEventListener("stop", resolve, { once: true });
     });
+    try { mr.requestData(); } catch (_) { /* ok */ }
     try { mr.stop(); } catch (_) { /* ok */ }
     await collected;
 
+    streamRef.current?.getTracks().forEach(t => t.stop());
     const blob = new Blob(chunksRef.current, { type: mimeType });
-    stopStream();
-    onSend(blob, dur);
-  }, [onSend, stopStream]);
+    onSendRef.current(blob, Math.max(1, dur));
+  }, []);
 
   const startRec = () => {
     const stream = streamRef.current;
@@ -477,11 +481,10 @@ function VideoNoteRecorder({ onSend, onCancel }: {
     mrRef.current = mr;
     chunksRef.current = [];
     durRef.current = 0;
-    mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+    mr.ondataavailable = e => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data); };
     mr.onerror = () => setError("Ошибка записи");
     mr.start(1000);
     setRecording(true);
-    console.log("[VideoNote] recording started, mimeType:", mr.mimeType);
     timerRef.current = setInterval(() => {
       durRef.current += 1;
       setSeconds(durRef.current);
