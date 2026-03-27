@@ -562,6 +562,130 @@ function VideoNoteRecorder({ onSend, onCancel }: {
   );
 }
 
+// ─── Video Note Message ───────────────────────────────────────────────────────
+function VideoNoteMessage({ m }: { m: Message }) {
+  const [open, setOpen] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const fullRef = useRef<HTMLVideoElement>(null);
+
+  const togglePlay = (e: { stopPropagation: () => void }) => {
+    e.stopPropagation();
+    setOpen(true);
+  };
+
+  useEffect(() => {
+    if (open && fullRef.current) {
+      fullRef.current.play().then(() => setPlaying(true)).catch(() => {});
+    }
+  }, [open]);
+
+  const onTimeUpdate = () => {
+    const v = fullRef.current;
+    if (!v || !v.duration) return;
+    setProgress((v.currentTime / v.duration) * 100);
+  };
+
+  const onEnded = () => { setPlaying(false); setProgress(0); };
+
+  const toggleFullPlay = () => {
+    const v = fullRef.current;
+    if (!v) return;
+    if (v.paused) { v.play().then(() => setPlaying(true)).catch(() => {}); }
+    else { v.pause(); setPlaying(false); }
+  };
+
+  const dur = m.text?.match(/(\d+)с/) ? parseInt(m.text.match(/(\d+)с/)![1]) : 0;
+  const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+
+  return (
+    <>
+      <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
+        <div className="flex flex-col items-center gap-1">
+          <div
+            onClick={m.media_url ? togglePlay : undefined}
+            className={`w-[140px] h-[140px] rounded-full overflow-hidden relative shadow-xl ${m.media_url ? "cursor-pointer" : ""} ${m.out ? "border-[3px] border-violet-400/60" : "border-[3px] border-white dark:border-gray-600"}`}
+          >
+            {m.media_url ? (
+              <>
+                <video
+                  ref={videoRef}
+                  src={m.media_url}
+                  className="w-full h-full object-cover"
+                  muted playsInline preload="metadata"
+                />
+                <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
+                  <div className="w-12 h-12 rounded-full bg-white/25 backdrop-blur-sm flex items-center justify-center">
+                    <Icon name="Play" size={22} className="text-white translate-x-0.5" />
+                  </div>
+                </div>
+                {dur > 0 && (
+                  <div className="absolute bottom-4 left-0 right-0 flex justify-center">
+                    <span className="text-white text-[11px] font-semibold drop-shadow">{fmt(dur)}</span>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="w-full h-full flex items-center justify-center bg-violet-100 dark:bg-violet-900">
+                <Icon name="Video" size={36} className="text-violet-400" />
+              </div>
+            )}
+          </div>
+          <div className={`flex items-center gap-1 text-[10px] ${m.out ? "text-muted-foreground" : "text-muted-foreground"}`}>
+            <span>{m.time}</span>
+            {m.out && (m.status === "read"
+              ? <Icon name="CheckCheck" size={10} className="text-violet-500" />
+              : <Icon name="CheckCheck" size={10} className="text-muted-foreground" />
+            )}
+          </div>
+        </div>
+      </div>
+
+      {open && m.media_url && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 animate-fade-in"
+          onClick={() => { fullRef.current?.pause(); setOpen(false); setPlaying(false); setProgress(0); }}
+        >
+          <div className="flex flex-col items-center gap-4" onClick={e => e.stopPropagation()}>
+            <div className="relative w-72 h-72 rounded-full overflow-hidden shadow-2xl">
+              <video
+                ref={fullRef}
+                src={m.media_url}
+                className="w-full h-full object-cover"
+                playsInline
+                onTimeUpdate={onTimeUpdate}
+                onEnded={onEnded}
+              />
+              <svg className="absolute inset-0 w-full h-full -rotate-90 pointer-events-none" viewBox="0 0 100 100">
+                <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="3" />
+                <circle cx="50" cy="50" r="48" fill="none" stroke="white" strokeWidth="3"
+                  strokeDasharray={`${2 * Math.PI * 48}`}
+                  strokeDashoffset={`${2 * Math.PI * 48 * (1 - progress / 100)}`}
+                  style={{ transition: "stroke-dashoffset 0.2s linear" }} />
+              </svg>
+              <button
+                onClick={toggleFullPlay}
+                className="absolute inset-0 flex items-center justify-center"
+              >
+                <div className={`w-14 h-14 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center transition-opacity ${playing ? "opacity-0 hover:opacity-100" : "opacity-100"}`}>
+                  <Icon name={playing ? "Pause" : "Play"} size={26} className="text-white translate-x-0.5" />
+                </div>
+              </button>
+            </div>
+            <button
+              onClick={() => { fullRef.current?.pause(); setOpen(false); setPlaying(false); setProgress(0); }}
+              className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center text-white hover:bg-white/30 transition-colors"
+            >
+              <Icon name="X" size={18} />
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 // ─── User Profile Modal ───────────────────────────────────────────────────────
 function UserProfileModal({ user: initialUser, onClose, onStartChat, currentUserId }: {
   user: User; onClose: () => void;
@@ -1975,29 +2099,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     const hasMedia = m.media_url;
 
     if (isVideoNote) {
-      return (
-        <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
-          <div className="flex flex-col items-center gap-1">
-            <div className="w-28 h-28 rounded-full overflow-hidden border-4 border-white dark:border-gray-700 shadow-lg relative">
-              {hasMedia ? (
-                <video src={m.media_url} className="w-full h-full object-cover" controls playsInline
-                  style={{ borderRadius: "50%" }} />
-              ) : (
-                <div className="w-full h-full flex items-center justify-center bg-violet-100 dark:bg-violet-900">
-                  <Icon name="Video" size={32} className="text-violet-500" />
-                </div>
-              )}
-              <button className="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 hover:opacity-100 transition-opacity rounded-full">
-                <Icon name="Play" size={24} className="text-white" />
-              </button>
-            </div>
-            <div className={`flex items-center gap-1 text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
-              <span>{m.time}</span>
-              {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={10} className="text-cyan-400" /> : <Icon name="CheckCheck" size={10} />)}
-            </div>
-          </div>
-        </div>
-      );
+      return <VideoNoteMessage m={m} />;
     }
 
     if (isVoice) {
