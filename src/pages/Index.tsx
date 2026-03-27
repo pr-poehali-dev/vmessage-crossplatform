@@ -413,11 +413,11 @@ function VideoNoteRecorder({ onSend, onCancel }: {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const durRef = useRef(0);
   const busyRef = useRef(false);
-  const MAX = 60;
+  const MAX = 15;
 
   useEffect(() => {
     let cancelled = false;
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true })
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 480 }, height: { ideal: 480 } }, audio: true })
       .then(stream => {
         if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
         streamRef.current = stream;
@@ -439,12 +439,37 @@ function VideoNoteRecorder({ onSend, onCancel }: {
     };
   }, []);
 
+  const onSendRef = useRef(onSend);
+  useEffect(() => { onSendRef.current = onSend; }, [onSend]);
+
+  const stopRecRef = useRef<() => void>(() => {});
+
+  stopRecRef.current = () => {
+    const mr = mrRef.current;
+    if (!mr || busyRef.current) return;
+    if (mr.state === "inactive") return;
+    busyRef.current = true;
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    setPhase("sending");
+    const dur = durRef.current;
+    const mimeType = mr.mimeType || "video/webm";
+
+    mr.addEventListener("stop", () => {
+      streamRef.current?.getTracks().forEach(t => t.stop());
+      const blob = new Blob(chunksRef.current, { type: mimeType });
+      onSendRef.current(blob, Math.max(1, dur));
+    }, { once: true });
+
+    try { mr.stop(); } catch (_) { /* ok */ }
+  };
+
   const startRec = () => {
     const stream = streamRef.current;
     if (!stream || phase !== "ready") return;
     const mimeType = ["video/webm;codecs=vp8,opus", "video/webm;codecs=vp9,opus", "video/webm", "video/mp4", ""]
       .find(t => !t || MediaRecorder.isTypeSupported(t)) ?? "";
-    const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    const mrOpts: MediaRecorderOptions = mimeType ? { mimeType, videoBitsPerSecond: 300000, audioBitsPerSecond: 32000 } : { videoBitsPerSecond: 300000, audioBitsPerSecond: 32000 };
+    const mr = new MediaRecorder(stream, mrOpts);
     mrRef.current = mr;
     chunksRef.current = [];
     durRef.current = 0;
@@ -457,28 +482,11 @@ function VideoNoteRecorder({ onSend, onCancel }: {
       durRef.current += 1;
       setSeconds(durRef.current);
       setProgress((durRef.current / MAX) * 100);
-      if (durRef.current >= MAX) stopRec();
+      if (durRef.current >= MAX) stopRecRef.current();
     }, 1000);
   };
 
-  const stopRec = () => {
-    const mr = mrRef.current;
-    if (!mr || busyRef.current) return;
-    if (mr.state === "inactive") return;
-    busyRef.current = true;
-    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-    setPhase("sending");
-    const dur = durRef.current;
-    const mimeType = mr.mimeType || "video/webm";
-
-    mr.onstop = () => {
-      streamRef.current?.getTracks().forEach(t => t.stop());
-      const blob = new Blob(chunksRef.current, { type: mimeType });
-      console.log("[VID] onstop, chunks=", chunksRef.current.length, "blob.size=", blob.size);
-      onSend(blob, Math.max(1, dur));
-    };
-    try { mr.stop(); } catch (_) { /* ok */ }
-  };
+  const stopRec = () => stopRecRef.current();
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 animate-fade-in">
@@ -2015,21 +2023,18 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
   };
 
   const sendVideoNote = async (blob: Blob, duration: number) => {
-    console.log("[VID] sendVideoNote called, blob.size=", blob?.size, "duration=", duration);
-    if (!blob || blob.size < 100) { console.warn("[VID] blob too small"); setShowVideoNote(false); return; }
+    if (!blob || blob.size < 100) { setShowVideoNote(false); return; }
+    const chatId = chat.id;
     const mimeType = blob.type || "video/webm";
     const ext = mimeType.includes("mp4") ? "mp4" : "webm";
     try {
-      console.log("[VID] converting to base64...");
       const base64 = await blobToBase64(blob);
-      console.log("[VID] base64 ready, length=", base64.length, "sending to API...");
-      const res = await chatsApi.sendMedia(chat.id, base64, mimeType, "video_note", `⭕ Видеосообщение ${duration}с`, `note.${ext}`);
-      console.log("[VID] API response:", res);
-      if (res.ok) setMessages(m => [...m, {
+      const res = await chatsApi.sendMedia(chatId, base64, mimeType, "video_note", `⭕ Видеосообщение ${duration}с`, `note.${ext}`);
+      if (res?.ok) setMessages(m => [...m, {
         ...res.message, sender_id: me.id, sender_name: me.display_name,
         sender_color: me.avatar_color, sender_username: me.username
       }]);
-    } catch (e) { console.error("[VID] error", e); }
+    } catch (_) { /* ok */ }
     setShowVideoNote(false);
   };
 
