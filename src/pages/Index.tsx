@@ -2022,39 +2022,41 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     } catch (e) { console.error("[VOICE] error", e); }
   };
 
+  // Универсальная загрузка через presigned URL — минует лимит тела функции
+  const uploadMedia = async (blob: Blob, mimeType: string, msgType: string, text: string, filename: string) => {
+    const chatId = chat.id;
+    const res = await chatsApi.getUploadUrl(chatId, mimeType, msgType, text, filename);
+    if (!res?.ok) throw new Error(res?.error || "upload_url failed");
+    await fetch(res.upload_url, { method: "PUT", body: blob, headers: { "Content-Type": mimeType } });
+    return res.message;
+  };
+
   const sendVideoNote = async (blob: Blob, duration: number) => {
     if (!blob || blob.size < 100) { setShowVideoNote(false); return; }
-    const chatId = chat.id;
     const mimeType = blob.type || "video/webm";
     const ext = mimeType.includes("mp4") ? "mp4" : "webm";
     try {
-      const base64 = await blobToBase64(blob);
-      const res = await chatsApi.sendMedia(chatId, base64, mimeType, "video_note", `⭕ Видеосообщение ${duration}с`, `note.${ext}`);
-      if (res?.ok) setMessages(m => [...m, {
-        ...res.message, sender_id: me.id, sender_name: me.display_name,
-        sender_color: me.avatar_color, sender_username: me.username
-      }]);
+      const msg = await uploadMedia(blob, mimeType, "video_note", `⭕ Видеосообщение ${duration}с`, `note.${ext}`);
+      setMessages(m => [...m, { ...msg, sender_id: me.id, sender_name: me.display_name, sender_color: me.avatar_color, sender_username: me.username }]);
     } catch (_) { /* ok */ }
     setShowVideoNote(false);
   };
 
   const sendFile = async (file: File, msgType = "file") => {
     setShowAttachMenu(false);
-    // Автоопределение типа по MIME
     let type = msgType;
     if (msgType === "file") {
       if (file.type.startsWith("image/")) type = "image";
       else if (file.type.startsWith("video/")) type = "video";
-      else if (file.type.startsWith("audio/")) type = "file"; // аудио-файлы как file
+      else if (file.type.startsWith("audio/")) type = "file";
     }
     const prefix = type === "image" ? "📷" : type === "video" ? "🎬" : type === "audio" ? "🎵" : "📎";
     const mimeType = file.type || "application/octet-stream";
-    const base64 = await blobToBase64(file);
-    const res = await chatsApi.sendMedia(chat.id, base64, mimeType, type, `${prefix} ${file.name}`, file.name);
-    if (res.ok) setMessages(m => [...m, {
-      ...res.message, sender_id: me.id, sender_name: me.display_name,
-      sender_color: me.avatar_color, sender_username: me.username
-    }]);
+    try {
+      const msg = await uploadMedia(file, mimeType, type, `${prefix} ${file.name}`, file.name);
+      setMessages(m => [...m, { ...msg, sender_id: me.id, sender_name: me.display_name, sender_color: me.avatar_color, sender_username: me.username }]);
+    } catch (_) { /* ok */ }
+    // legacy fallback removed
   };
 
   const sendLocation = async () => {

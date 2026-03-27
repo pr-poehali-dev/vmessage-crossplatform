@@ -132,6 +132,9 @@ export const chatsApi = {
   sendMedia: (chat_id: number, data: string, mime_type: string, msg_type: string, text: string, filename = "") =>
     call(CHATS_URL, "send_media", "POST", { chat_id, data, mime_type, msg_type, text, filename }),
 
+  getUploadUrl: (chat_id: number, mime_type: string, msg_type: string, text: string, filename = "") =>
+    call(CHATS_URL, "get_upload_url", "POST", { chat_id, mime_type, msg_type, text, filename }),
+
   sendLocation: (chat_id: number, lat: number, lon: number, address: string) =>
     call(CHATS_URL, "send_location", "POST", { chat_id, lat, lon, address }),
 

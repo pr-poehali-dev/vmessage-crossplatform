@@ -441,6 +441,63 @@ def handler(event: dict, context) -> dict:
             "status": "sent", "out": True, "media_url": media_url
         }})
 
+    # get_upload_url — получить presigned URL для прямой загрузки на S3
+    if action == "get_upload_url":
+        chat_id = body.get("chat_id")
+        mime_type = body.get("mime_type", "application/octet-stream")
+        msg_type = body.get("msg_type", "file")
+        filename = body.get("filename", "")
+        text = body.get("text", "")
+
+        if not chat_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен chat_id"})
+
+        cur.execute(f"SELECT 1 FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нет доступа"})
+
+        folder_map = {"voice": "voice", "video_note": "video_notes", "image": "images", "video": "videos", "file": "files"}
+        folder = folder_map.get(msg_type, "files")
+
+        if filename and "." in filename:
+            ext = filename.rsplit(".", 1)[-1].lower()[:10]
+        elif mime_type in MIME_EXT:
+            ext = MIME_EXT[mime_type]
+        else:
+            raw = mime_type.split("/")[-1].split(";")[0].strip()
+            ext = raw[:10] if raw else "bin"
+
+        key = f"{folder}/{uuid.uuid4()}.{ext}"
+        cdn_url = f"https://cdn.poehali.dev/projects/{os.environ['AWS_ACCESS_KEY_ID']}/bucket/{key}"
+
+        s3 = boto3.client(
+            "s3",
+            endpoint_url="https://bucket.poehali.dev",
+            aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+            aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+        )
+        upload_url = s3.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": "files", "Key": key, "ContentType": mime_type},
+            ExpiresIn=300
+        )
+
+        # Сохраняем сообщение сразу с cdn_url
+        cur.execute(
+            f"INSERT INTO {SCHEMA}.vm_messages (chat_id, sender_id, msg_text, msg_type, msg_status, media_url) VALUES (%s, %s, %s, %s, 'sent', %s) RETURNING id, created_at",
+            (chat_id, user_id, text, msg_type, cdn_url)
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "upload_url": upload_url, "cdn_url": cdn_url, "message": {
+            "id": row[0], "time": row[1].strftime("%H:%M"),
+            "text": text, "type": msg_type,
+            "status": "sent", "out": True, "media_url": cdn_url
+        }})
+
     # send_location — отправить геолокацию как текстовое сообщение
     if action == "send_location":
         chat_id = body.get("chat_id")
