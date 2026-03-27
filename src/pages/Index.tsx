@@ -410,16 +410,20 @@ function VideoNoteRecorder({ onSend, onCancel }: {
   const streamRef = useRef<MediaStream | null>(null);
   const mrRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const startedAtRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const durRef = useRef(0);
-  const busyRef = useRef(false);
-  const MAX = 15;
+  const onSendRef = useRef(onSend);
+  const onCancelRef = useRef(onCancel);
+  useEffect(() => { onSendRef.current = onSend; }, [onSend]);
+  useEffect(() => { onCancelRef.current = onCancel; }, [onCancel]);
+  const MAX = 60;
 
+  // Инициализация камеры — один раз при монтировании
   useEffect(() => {
-    let cancelled = false;
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 480 }, height: { ideal: 480 } }, audio: true })
+    let alive = true;
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true })
       .then(stream => {
-        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+        if (!alive) { stream.getTracks().forEach(t => t.stop()); return; }
         streamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
@@ -427,66 +431,63 @@ function VideoNoteRecorder({ onSend, onCancel }: {
         }
         setPhase("ready");
       })
-      .catch(() => { if (!cancelled) setPhase("error"); });
+      .catch(() => { if (alive) setPhase("error"); });
     return () => {
-      cancelled = true;
-      if (timerRef.current) clearInterval(timerRef.current);
-      if (!busyRef.current) {
-        streamRef.current?.getTracks().forEach(t => t.stop());
-        const mr = mrRef.current;
-        if (mr && mr.state !== "inactive") { try { mr.stop(); } catch (_) { /* ok */ } }
+      alive = false;
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+      if (mrRef.current && mrRef.current.state !== "inactive") {
+        mrRef.current.onstop = null;
+        try { mrRef.current.stop(); } catch (_) { /* ok */ }
       }
-    };
-  }, []);
-
-  const onSendRef = useRef(onSend);
-  useEffect(() => { onSendRef.current = onSend; }, [onSend]);
-
-  const stopRecRef = useRef<() => void>(() => {});
-
-  stopRecRef.current = () => {
-    const mr = mrRef.current;
-    if (!mr || busyRef.current) return;
-    if (mr.state === "inactive") return;
-    busyRef.current = true;
-    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-    setPhase("sending");
-    const dur = durRef.current;
-    const mimeType = mr.mimeType || "video/webm";
-
-    mr.addEventListener("stop", () => {
       streamRef.current?.getTracks().forEach(t => t.stop());
-      const blob = new Blob(chunksRef.current, { type: mimeType });
-      onSendRef.current(blob, Math.max(1, dur));
-    }, { once: true });
-
-    try { mr.stop(); } catch (_) { /* ok */ }
-  };
+    };
+   
+  }, []);
 
   const startRec = () => {
     const stream = streamRef.current;
     if (!stream || phase !== "ready") return;
     const mimeType = ["video/webm;codecs=vp8,opus", "video/webm;codecs=vp9,opus", "video/webm", "video/mp4", ""]
       .find(t => !t || MediaRecorder.isTypeSupported(t)) ?? "";
-    const mrOpts: MediaRecorderOptions = mimeType ? { mimeType, videoBitsPerSecond: 300000, audioBitsPerSecond: 32000 } : { videoBitsPerSecond: 300000, audioBitsPerSecond: 32000 };
-    const mr = new MediaRecorder(stream, mrOpts);
+    const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
     mrRef.current = mr;
     chunksRef.current = [];
-    durRef.current = 0;
     mr.ondataavailable = e => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data); };
-    mr.start(250);
+    mr.start();
+    startedAtRef.current = Date.now();
     setPhase("recording");
     setSeconds(0);
     setProgress(0);
     timerRef.current = setInterval(() => {
-      durRef.current += 1;
-      setSeconds(durRef.current);
-      setProgress((durRef.current / MAX) * 100);
-      if (durRef.current >= MAX) stopRecRef.current();
-    }, 1000);
+      const elapsed = Math.floor((Date.now() - startedAtRef.current) / 1000);
+      setSeconds(elapsed);
+      setProgress((elapsed / MAX) * 100);
+      if (elapsed >= MAX) stopRec();
+    }, 500);
   };
 
-  const stopRec = () => stopRecRef.current();
+  // Точно как в VoiceRecorder — async с Promise на stop-событие
+  const stopRec = async () => {
+    const mr = mrRef.current;
+    if (!mr || mr.state === "inactive") return;
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    const dur = Math.floor((Date.now() - startedAtRef.current) / 1000);
+    const mimeType = mr.mimeType || "video/webm";
+    setPhase("sending");
+
+    const collected = new Promise<void>(resolve => {
+      mr.addEventListener("stop", resolve, { once: true });
+    });
+    if (mr.state === "recording") {
+      try { mr.requestData(); } catch (_) { /* ok */ }
+      try { mr.stop(); } catch (_) { /* ok */ }
+    }
+    await collected;
+
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    const blob = new Blob(chunksRef.current, { type: mimeType });
+    onSendRef.current(blob, Math.max(1, dur));
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 animate-fade-in">
@@ -497,7 +498,7 @@ function VideoNoteRecorder({ onSend, onCancel }: {
               <Icon name="VideoOff" size={36} className="text-red-400" />
             </div>
             <p className="text-white/70 text-sm text-center">Нет доступа к камере/микрофону</p>
-            <button onClick={onCancel} className="px-5 py-2 rounded-xl bg-white/20 text-white text-sm">Закрыть</button>
+            <button onClick={onCancelRef.current} className="px-5 py-2 rounded-xl bg-white/20 text-white text-sm">Закрыть</button>
           </div>
         ) : (
           <>
@@ -527,7 +528,7 @@ function VideoNoteRecorder({ onSend, onCancel }: {
               )}
             </div>
             <div className="flex items-center gap-5">
-              <button onClick={onCancel} disabled={phase === "sending"}
+              <button onClick={onCancelRef.current} disabled={phase === "sending"}
                 className="w-12 h-12 rounded-full bg-white/20 text-white flex items-center justify-center hover:bg-white/30 transition-colors disabled:opacity-30 disabled:pointer-events-none">
                 <Icon name="X" size={20} />
               </button>
