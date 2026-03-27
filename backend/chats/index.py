@@ -54,7 +54,7 @@ MIME_EXT = {
 }
 
 def upload_to_s3(data_b64: str, mime_type: str, folder: str, filename: str = "") -> str:
-    data = base64.b64decode(data_b64)
+    data = base64.b64decode(data_b64.replace(" ", "+").strip())
     # Определяем расширение
     if filename and "." in filename:
         ext = filename.rsplit(".", 1)[-1].lower()[:10]

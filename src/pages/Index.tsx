@@ -2023,7 +2023,6 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
   };
 
   const sendVideoNote = async (blob: Blob, duration: number) => {
-    alert(`[VID] blob=${blob?.size} dur=${duration}`);
     if (!blob || blob.size < 100) { setShowVideoNote(false); return; }
     const chatId = chat.id;
     const mimeType = blob.type || "video/webm";
@@ -2031,12 +2030,11 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     try {
       const base64 = await blobToBase64(blob);
       const res = await chatsApi.sendMedia(chatId, base64, mimeType, "video_note", `⭕ Видеосообщение ${duration}с`, `note.${ext}`);
-      alert(`[VID] res=${JSON.stringify(res)?.slice(0,200)}`);
       if (res?.ok) setMessages(m => [...m, {
         ...res.message, sender_id: me.id, sender_name: me.display_name,
         sender_color: me.avatar_color, sender_username: me.username
       }]);
-    } catch (e) { alert(`[VID] error: ${e}`); }
+    } catch (_) { /* ok */ }
     setShowVideoNote(false);
   };
 
