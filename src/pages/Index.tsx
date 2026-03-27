@@ -532,7 +532,8 @@ function VideoNoteRecorder({ onSend, onCancel }: {
               )}
             </div>
             <div className="flex items-center gap-5">
-              <button onClick={onCancel} className="w-12 h-12 rounded-full bg-white/20 text-white flex items-center justify-center hover:bg-white/30 transition-colors">
+              <button onClick={onCancelRef.current} disabled={sending}
+                className="w-12 h-12 rounded-full bg-white/20 text-white flex items-center justify-center hover:bg-white/30 transition-colors disabled:opacity-30 disabled:pointer-events-none">
                 <Icon name="X" size={20} />
               </button>
               {sending ? (
@@ -1903,11 +1904,11 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
   };
 
   const sendVideoNote = async (blob: Blob, duration: number) => {
-    setShowVideoNote(false);
-    if (!blob || blob.size < 100) { console.warn("[VIDEO_NOTE] empty blob", blob?.size); return; }
+    // НЕ закрываем модал здесь — компонент сам показывает "Отправка..."
+    // Модал закроем только после загрузки
+    if (!blob || blob.size < 100) { setShowVideoNote(false); return; }
     const mimeType = blob.type || "video/webm";
     const ext = mimeType.includes("mp4") ? "mp4" : "webm";
-    console.log("[VIDEO_NOTE] sending", blob.size, "bytes,", mimeType);
     try {
       const base64 = await blobToBase64(blob);
       const res = await chatsApi.sendMedia(chat.id, base64, mimeType, "video_note", `⭕ Видеосообщение ${duration}с`, `note.${ext}`);
@@ -1915,8 +1916,8 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
         ...res.message, sender_id: me.id, sender_name: me.display_name,
         sender_color: me.avatar_color, sender_username: me.username
       }]);
-      else console.error("[VIDEO_NOTE] send failed", res);
-    } catch (e) { console.error("[VIDEO_NOTE] error", e); }
+    } catch (_) { /* ok */ }
+    setShowVideoNote(false);
   };
 
   const sendFile = async (file: File, msgType = "file") => {
