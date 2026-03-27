@@ -1907,6 +1907,20 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
   const [showChatMenu, setShowChatMenu] = useState(false);
   const [recording, setRecording] = useState(false);
   const [showVideoNote, setShowVideoNote] = useState(false);
+  const [kbOffset, setKbOffset] = useState(0);
+
+  // iOS: сдвигаем layout когда появляется клавиатура
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const handler = () => {
+      const offset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      setKbOffset(offset);
+    };
+    vv.addEventListener("resize", handler);
+    vv.addEventListener("scroll", handler);
+    return () => { vv.removeEventListener("resize", handler); vv.removeEventListener("scroll", handler); };
+  }, []);
 
   const [showCall, setShowCall] = useState<"audio" | "video" | null>(null);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
@@ -2025,9 +2039,11 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
   // Универсальная загрузка через presigned URL — минует лимит тела функции
   const uploadMedia = async (blob: Blob, mimeType: string, msgType: string, text: string, filename: string) => {
     const chatId = chat.id;
-    const res = await chatsApi.getUploadUrl(chatId, mimeType, msgType, text, filename);
+    // Убираем кодеки из mimeType для S3 — только base тип (video/webm, не video/webm;codecs=vp8)
+    const baseMime = mimeType.split(";")[0].trim();
+    const res = await chatsApi.getUploadUrl(chatId, baseMime, msgType, text, filename);
     if (!res?.ok) throw new Error(res?.error || "upload_url failed");
-    await fetch(res.upload_url, { method: "PUT", body: blob, headers: { "Content-Type": mimeType } });
+    await fetch(res.upload_url, { method: "PUT", body: blob, headers: { "Content-Type": baseMime } });
     return res.message;
   };
 
@@ -2333,7 +2349,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
       )}
 
       {/* Input */}
-      <div className="vm-glass border-t px-2 py-2 flex-shrink-0">
+      <div className="vm-glass border-t px-2 py-2 flex-shrink-0" style={{ paddingBottom: kbOffset ? `${kbOffset + 8}px` : undefined }}>
         {recording ? (
           <VoiceRecorder onSend={sendVoice} onCancel={() => setRecording(false)} />
         ) : (
