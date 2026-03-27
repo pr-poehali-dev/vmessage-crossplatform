@@ -444,29 +444,6 @@ function VideoNoteRecorder({ onSend, onCancel }: {
    
   }, []);
 
-  const startRec = () => {
-    const stream = streamRef.current;
-    if (!stream || phase !== "ready") return;
-    const mimeType = ["video/webm;codecs=vp8,opus", "video/webm;codecs=vp9,opus", "video/webm", "video/mp4", ""]
-      .find(t => !t || MediaRecorder.isTypeSupported(t)) ?? "";
-    const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-    mrRef.current = mr;
-    chunksRef.current = [];
-    mr.ondataavailable = e => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data); };
-    mr.start();
-    startedAtRef.current = Date.now();
-    setPhase("recording");
-    setSeconds(0);
-    setProgress(0);
-    timerRef.current = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - startedAtRef.current) / 1000);
-      setSeconds(elapsed);
-      setProgress((elapsed / MAX) * 100);
-      if (elapsed >= MAX) stopRec();
-    }, 500);
-  };
-
-  // Точно как в VoiceRecorder — async с Promise на stop-событие
   const stopRec = async () => {
     const mr = mrRef.current;
     if (!mr || mr.state === "inactive") return;
@@ -487,6 +464,28 @@ function VideoNoteRecorder({ onSend, onCancel }: {
     streamRef.current?.getTracks().forEach(t => t.stop());
     const blob = new Blob(chunksRef.current, { type: mimeType });
     onSendRef.current(blob, Math.max(1, dur));
+  };
+
+  const startRec = () => {
+    const stream = streamRef.current;
+    if (!stream || phase !== "ready") return;
+    const mimeType = ["video/webm;codecs=vp8,opus", "video/webm;codecs=vp9,opus", "video/webm", "video/mp4", ""]
+      .find(t => !t || MediaRecorder.isTypeSupported(t)) ?? "";
+    const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    mrRef.current = mr;
+    chunksRef.current = [];
+    mr.ondataavailable = e => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data); };
+    mr.start();
+    startedAtRef.current = Date.now();
+    setPhase("recording");
+    setSeconds(0);
+    setProgress(0);
+    timerRef.current = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startedAtRef.current) / 1000);
+      setSeconds(elapsed);
+      setProgress((elapsed / MAX) * 100);
+      if (elapsed >= MAX) stopRec();
+    }, 500);
   };
 
   return (
@@ -2024,6 +2023,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
   };
 
   const sendVideoNote = async (blob: Blob, duration: number) => {
+    alert(`[VID] blob=${blob?.size} dur=${duration}`);
     if (!blob || blob.size < 100) { setShowVideoNote(false); return; }
     const chatId = chat.id;
     const mimeType = blob.type || "video/webm";
@@ -2031,11 +2031,12 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     try {
       const base64 = await blobToBase64(blob);
       const res = await chatsApi.sendMedia(chatId, base64, mimeType, "video_note", `⭕ Видеосообщение ${duration}с`, `note.${ext}`);
+      alert(`[VID] res=${JSON.stringify(res)?.slice(0,200)}`);
       if (res?.ok) setMessages(m => [...m, {
         ...res.message, sender_id: me.id, sender_name: me.display_name,
         sender_color: me.avatar_color, sender_username: me.username
       }]);
-    } catch (_) { /* ok */ }
+    } catch (e) { alert(`[VID] error: ${e}`); }
     setShowVideoNote(false);
   };
 
