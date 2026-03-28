@@ -449,7 +449,7 @@ function VideoNoteRecorder({ onSend, onCancel }: {
     if (!mr || mr.state === "inactive") return;
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     const dur = Math.floor((Date.now() - startedAtRef.current) / 1000);
-    const mimeType = mr.mimeType || "video/webm";
+    const mimeType = (mr.mimeType || "video/webm").split(";")[0].trim();
     setPhase("sending");
 
     const collected = new Promise<void>(resolve => {
@@ -469,7 +469,8 @@ function VideoNoteRecorder({ onSend, onCancel }: {
   const startRec = () => {
     const stream = streamRef.current;
     if (!stream || phase !== "ready") return;
-    const mimeType = ["video/webm;codecs=vp8,opus", "video/webm;codecs=vp9,opus", "video/webm", "video/mp4", ""]
+    // Предпочитаем mp4 (Safari/iOS), затем чистый webm без кодеков
+    const mimeType = ["video/mp4", "video/webm", ""]
       .find(t => !t || MediaRecorder.isTypeSupported(t)) ?? "";
     const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
     mrRef.current = mr;
@@ -2285,16 +2286,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
             <Icon name="Link" size={18} />
           </button>
         )}
-        {chat.type === "private" && (
-          <>
-            <button onClick={() => setShowCall("audio")} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground hover:text-violet-500">
-              <Icon name="Phone" size={18} />
-            </button>
-            <button onClick={() => setShowCall("video")} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground hover:text-violet-500">
-              <Icon name="Video" size={18} />
-            </button>
-          </>
-        )}
+        {/* Звонки временно отключены */}
         {/* Chat menu */}
         <div className="relative">
           <button onClick={() => setShowChatMenu(v => !v)} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground">
