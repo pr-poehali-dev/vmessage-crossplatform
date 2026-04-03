@@ -563,8 +563,14 @@ function VideoNoteMessage({ m }: { m: Message }) {
   const [open, setOpen] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [canPlay, setCanPlay] = useState(true);
   const videoRef = useRef<HTMLVideoElement>(null);
   const fullRef = useRef<HTMLVideoElement>(null);
+
+  const videoType = m.media_url?.endsWith(".mp4") ? "video/mp4"
+    : m.media_url?.endsWith(".webm") ? "video/webm"
+    : m.media_url?.endsWith(".mov") ? "video/mp4"
+    : undefined;
 
   const togglePlay = (e: { stopPropagation: () => void }) => {
     e.stopPropagation();
@@ -605,12 +611,20 @@ function VideoNoteMessage({ m }: { m: Message }) {
           >
             {m.media_url ? (
               <>
-                <video
-                  ref={videoRef}
-                  src={m.media_url}
-                  className="w-full h-full object-cover"
-                  muted playsInline preload="metadata"
-                />
+                {canPlay ? (
+                  <video
+                    ref={videoRef}
+                    className="w-full h-full object-cover"
+                    muted playsInline preload="metadata"
+                    onError={() => setCanPlay(false)}
+                  >
+                    <source src={m.media_url} type={videoType} />
+                  </video>
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center bg-violet-100 dark:bg-violet-900">
+                    <Icon name="Video" size={36} className="text-violet-400" />
+                  </div>
+                )}
                 <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
                   <div className="w-12 h-12 rounded-full bg-white/25 backdrop-blur-sm flex items-center justify-center">
                     <Icon name="Play" size={22} className="text-white translate-x-0.5" />
@@ -647,12 +661,13 @@ function VideoNoteMessage({ m }: { m: Message }) {
             <div className="relative w-72 h-72 rounded-full overflow-hidden shadow-2xl">
               <video
                 ref={fullRef}
-                src={m.media_url}
                 className="w-full h-full object-cover"
                 playsInline
                 onTimeUpdate={onTimeUpdate}
                 onEnded={onEnded}
-              />
+              >
+                <source src={m.media_url} type={videoType} />
+              </video>
               <svg className="absolute inset-0 w-full h-full -rotate-90 pointer-events-none" viewBox="0 0 100 100">
                 <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="3" />
                 <circle cx="50" cy="50" r="48" fill="none" stroke="white" strokeWidth="3"
@@ -2065,15 +2080,13 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     if (msgType === "file") {
       if (file.type.startsWith("image/")) type = "image";
       else if (file.type.startsWith("video/")) type = "video";
-      else if (file.type.startsWith("audio/")) type = "file";
     }
-    const prefix = type === "image" ? "📷" : type === "video" ? "🎬" : type === "audio" ? "🎵" : "📎";
+    const prefix = type === "image" ? "📷" : type === "video" ? "🎬" : "📎";
     const mimeType = file.type || "application/octet-stream";
     try {
       const msg = await uploadMedia(file, mimeType, type, `${prefix} ${file.name}`, file.name);
       setMessages(m => [...m, { ...msg, sender_id: me.id, sender_name: me.display_name, sender_color: me.avatar_color, sender_username: me.username }]);
-    } catch (_) { /* ok */ }
-    // legacy fallback removed
+    } catch (err) { console.error("sendFile error:", err); }
   };
 
   const sendLocation = async () => {
@@ -2160,7 +2173,9 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
       return (
         <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
           <div className="max-w-[240px]">
-            <video src={m.media_url} className="rounded-2xl w-full max-h-48 object-cover" controls />
+            <video className="rounded-2xl w-full max-h-48 object-cover" controls playsInline>
+              <source src={m.media_url} type={m.media_url?.endsWith(".mp4") ? "video/mp4" : m.media_url?.endsWith(".webm") ? "video/webm" : undefined} />
+            </video>
             <div className={`flex items-center justify-end gap-1 mt-1 text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
               <span>{m.time}</span>
               {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={10} className="text-cyan-300" /> : <Icon name="CheckCheck" size={10} />)}
