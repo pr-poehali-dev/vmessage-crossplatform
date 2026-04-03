@@ -563,14 +563,9 @@ function VideoNoteMessage({ m }: { m: Message }) {
   const [open, setOpen] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [canPlay, setCanPlay] = useState(true);
+  const [canPlay, setCanPlay] = useState<boolean | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const fullRef = useRef<HTMLVideoElement>(null);
-
-  const videoType = m.media_url?.endsWith(".mp4") ? "video/mp4"
-    : m.media_url?.endsWith(".webm") ? "video/webm"
-    : m.media_url?.endsWith(".mov") ? "video/mp4"
-    : undefined;
 
   const togglePlay = (e: { stopPropagation: () => void }) => {
     e.stopPropagation();
@@ -611,25 +606,30 @@ function VideoNoteMessage({ m }: { m: Message }) {
           >
             {m.media_url ? (
               <>
-                {canPlay ? (
-                  <video
-                    ref={videoRef}
-                    className="w-full h-full object-cover"
-                    muted playsInline preload="metadata"
-                    onError={() => setCanPlay(false)}
-                  >
-                    <source src={m.media_url} type={videoType} />
-                  </video>
+                <video
+                  ref={videoRef}
+                  src={m.media_url}
+                  className="w-full h-full object-cover"
+                  muted playsInline preload="metadata"
+                  onCanPlay={() => setCanPlay(true)}
+                  onError={() => setCanPlay(false)}
+                />
+                {canPlay === false ? (
+                  <div className="absolute inset-0 bg-violet-900/80 flex flex-col items-center justify-center gap-2">
+                    <Icon name="Video" size={28} className="text-white/70" />
+                    <a href={m.media_url} target="_blank" rel="noreferrer"
+                      className="text-white text-[11px] underline underline-offset-2 px-2 text-center"
+                      onClick={e => e.stopPropagation()}>
+                      Открыть
+                    </a>
+                  </div>
                 ) : (
-                  <div className="w-full h-full flex items-center justify-center bg-violet-100 dark:bg-violet-900">
-                    <Icon name="Video" size={36} className="text-violet-400" />
+                  <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
+                    <div className="w-12 h-12 rounded-full bg-white/25 backdrop-blur-sm flex items-center justify-center">
+                      <Icon name="Play" size={22} className="text-white translate-x-0.5" />
+                    </div>
                   </div>
                 )}
-                <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
-                  <div className="w-12 h-12 rounded-full bg-white/25 backdrop-blur-sm flex items-center justify-center">
-                    <Icon name="Play" size={22} className="text-white translate-x-0.5" />
-                  </div>
-                </div>
                 {dur > 0 && (
                   <div className="absolute bottom-4 left-0 right-0 flex justify-center">
                     <span className="text-white text-[11px] font-semibold drop-shadow">{fmt(dur)}</span>
@@ -661,13 +661,12 @@ function VideoNoteMessage({ m }: { m: Message }) {
             <div className="relative w-72 h-72 rounded-full overflow-hidden shadow-2xl">
               <video
                 ref={fullRef}
+                src={m.media_url}
                 className="w-full h-full object-cover"
                 playsInline
                 onTimeUpdate={onTimeUpdate}
                 onEnded={onEnded}
-              >
-                <source src={m.media_url} type={videoType} />
-              </video>
+              />
               <svg className="absolute inset-0 w-full h-full -rotate-90 pointer-events-none" viewBox="0 0 100 100">
                 <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="3" />
                 <circle cx="50" cy="50" r="48" fill="none" stroke="white" strokeWidth="3"
@@ -2065,12 +2064,14 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
 
   const sendVideoNote = async (blob: Blob, duration: number) => {
     if (!blob || blob.size < 100) { setShowVideoNote(false); return; }
-    const mimeType = blob.type || "video/webm";
+    const rawMime = blob.type || "video/webm";
+    const mimeType = rawMime.split(";")[0].trim();
     const ext = mimeType.includes("mp4") ? "mp4" : "webm";
+    console.log("[VIDEO NOTE] blob.type:", blob.type, "→ mimeType:", mimeType, "ext:", ext, "size:", blob.size);
     try {
       const msg = await uploadMedia(blob, mimeType, "video_note", `⭕ Видеосообщение ${duration}с`, `note.${ext}`);
       setMessages(m => [...m, { ...msg, sender_id: me.id, sender_name: me.display_name, sender_color: me.avatar_color, sender_username: me.username }]);
-    } catch (_) { /* ok */ }
+    } catch (e) { console.error("[VIDEO NOTE] upload error:", e); }
     setShowVideoNote(false);
   };
 
@@ -2173,9 +2174,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
       return (
         <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
           <div className="max-w-[240px]">
-            <video className="rounded-2xl w-full max-h-48 object-cover" controls playsInline>
-              <source src={m.media_url} type={m.media_url?.endsWith(".mp4") ? "video/mp4" : m.media_url?.endsWith(".webm") ? "video/webm" : undefined} />
-            </video>
+            <video src={m.media_url} className="rounded-2xl w-full max-h-48 object-cover" controls playsInline />
             <div className={`flex items-center justify-end gap-1 mt-1 text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
               <span>{m.time}</span>
               {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={10} className="text-cyan-300" /> : <Icon name="CheckCheck" size={10} />)}
@@ -2441,7 +2440,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
 
         <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={e => e.target.files?.[0] && sendFile(e.target.files[0], "image")} />
         <input ref={videoInputRef} type="file" accept="video/*" className="hidden" onChange={e => e.target.files?.[0] && sendFile(e.target.files[0], "video")} />
-        <input ref={docInputRef} type="file" className="hidden" onChange={e => e.target.files?.[0] && sendFile(e.target.files[0], "file")} />
+        <input ref={docInputRef} type="file" accept="*/*" className="hidden" onChange={e => e.target.files?.[0] && sendFile(e.target.files[0], "file")} />
       </div>
 
       {(showAttachMenu || showEmoji) && (
