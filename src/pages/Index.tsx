@@ -85,10 +85,10 @@ const VoiceMessage = ({ mediaUrl, dur, time, isOut, status }: VoiceMessageProps)
       </button>
       <div className="flex-1 min-w-0">
         <div
-          className="relative h-1.5 bg-white/20 rounded-full overflow-hidden cursor-pointer"
+          className={`relative h-1.5 rounded-full overflow-hidden cursor-pointer ${isOut ? "bg-white/20" : "bg-violet-200 dark:bg-violet-800"}`}
           onClick={handleSeek}
         >
-          <div className="h-full bg-white/70 rounded-full transition-none" style={{ width: `${progress}%` }} />
+          <div className={`h-full rounded-full transition-none ${isOut ? "bg-white/70" : "bg-violet-500"}`} style={{ width: `${progress}%` }} />
         </div>
         <div className={`text-[10px] mt-1 flex items-center justify-between ${isOut ? "text-white/60" : "text-muted-foreground"}`}>
           <span>{playing ? fmt(currentTime) : (duration ? `${duration}с` : "голосовое")}</span>
@@ -1236,33 +1236,75 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
 
 // ─── Active Sessions Modal ────────────────────────────────────────────────────
 function ActiveSessionsModal({ onClose }: { onClose: () => void }) {
-  const isMobile = /Mobile|Android|iPhone|iPad/.test(navigator.userAgent);
-  const browser = navigator.userAgent.includes("Chrome") ? "Chrome" :
-                  navigator.userAgent.includes("Firefox") ? "Firefox" :
-                  navigator.userAgent.includes("Safari") ? "Safari" : "Браузер";
+  const [sessions, setSessions] = useState<{ id: number; device: string; ip: string; created_at: string; last_active: string; is_current: boolean }[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [terminating, setTerminating] = useState(false);
+
+  useEffect(() => {
+    authApi.sessions().then(res => {
+      if (res.ok) setSessions(res.sessions);
+      setLoading(false);
+    });
+  }, []);
+
+  const logoutOther = async () => {
+    setTerminating(true);
+    await authApi.logoutOther();
+    const res = await authApi.sessions();
+    if (res.ok) setSessions(res.sessions);
+    setTerminating(false);
+  };
+
+  const deviceIcon = (device: string) => {
+    if (device.includes("iPhone") || device.includes("iPad") || device.includes("Android")) return "Smartphone";
+    if (device.includes("Windows") || device.includes("Mac") || device.includes("Linux")) return "Monitor";
+    return "Globe";
+  };
+
+  const otherCount = sessions.filter(s => !s.is_current).length;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-fade-in">
-      <div className="w-full max-w-sm bg-card rounded-3xl shadow-2xl p-5 animate-scale-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-fade-in" onClick={onClose}>
+      <div className="w-full max-w-sm bg-card rounded-3xl shadow-2xl p-5 animate-scale-in" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="font-bold text-lg">Активные сессии</h3>
           <button onClick={onClose} className="p-2 rounded-xl hover:bg-secondary transition-colors">
             <Icon name="X" size={18} />
           </button>
         </div>
-        <div className="space-y-3">
-          <div className="flex items-center gap-3 p-3 bg-violet-50 dark:bg-violet-900/20 rounded-2xl border border-violet-200 dark:border-violet-800">
-            <div className="w-10 h-10 rounded-xl vm-gradient-bg flex items-center justify-center flex-shrink-0">
-              <Icon name={isMobile ? "Smartphone" : "Monitor"} size={20} className="text-white" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="font-semibold text-sm">{isMobile ? "Мобильный браузер" : "Компьютер"}</div>
-              <div className="text-xs text-muted-foreground">{browser} · Текущая сессия</div>
-            </div>
-            <div className="w-2 h-2 bg-emerald-400 rounded-full" />
+        {loading ? (
+          <div className="flex items-center justify-center py-8">
+            <Icon name="Loader" size={24} className="animate-spin text-muted-foreground" />
           </div>
-        </div>
-        <p className="text-xs text-muted-foreground mt-4 text-center">Для завершения всех сессий — выйдите из аккаунта</p>
+        ) : (
+          <div className="space-y-2 max-h-64 overflow-y-auto vm-scrollbar">
+            {sessions.map(s => (
+              <div key={s.id} className={`flex items-center gap-3 p-3 rounded-2xl border ${s.is_current ? "bg-violet-50 dark:bg-violet-900/20 border-violet-200 dark:border-violet-800" : "bg-secondary/50 border-border"}`}>
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${s.is_current ? "vm-gradient-bg" : "bg-secondary"}`}>
+                  <Icon name={deviceIcon(s.device) as AnyIcon} size={20} className={s.is_current ? "text-white" : "text-muted-foreground"} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-semibold text-sm flex items-center gap-2">
+                    {s.device}
+                    {s.is_current && <span className="text-[10px] bg-violet-100 dark:bg-violet-800 text-violet-600 dark:text-violet-300 px-1.5 py-0.5 rounded-full">Текущая</span>}
+                  </div>
+                  <div className="text-xs text-muted-foreground">{s.ip && `${s.ip} · `}Активна: {s.last_active}</div>
+                </div>
+                {s.is_current && <div className="w-2 h-2 bg-emerald-400 rounded-full flex-shrink-0" />}
+              </div>
+            ))}
+          </div>
+        )}
+        {otherCount > 0 && (
+          <button onClick={logoutOther} disabled={terminating}
+            className="w-full mt-4 py-3 rounded-2xl bg-red-50 dark:bg-red-900/20 text-red-500 text-sm font-medium hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors flex items-center justify-center gap-2">
+            {terminating ? <Icon name="Loader" size={16} className="animate-spin" /> : <Icon name="LogOut" size={16} />}
+            Завершить другие сессии ({otherCount})
+          </button>
+        )}
+        {!loading && otherCount === 0 && (
+          <p className="text-xs text-muted-foreground mt-4 text-center">Других активных сессий нет</p>
+        )}
       </div>
     </div>
   );
@@ -2360,7 +2402,16 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
             <Icon name="Link" size={18} />
           </button>
         )}
-        {/* Звонки временно отключены */}
+        {chat.type === "private" && chat.partner_id && (
+          <>
+            <button onClick={() => setShowCall("audio")} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground" title="Аудиозвонок">
+              <Icon name="Phone" size={18} />
+            </button>
+            <button onClick={() => setShowCall("video")} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground" title="Видеозвонок">
+              <Icon name="Video" size={18} />
+            </button>
+          </>
+        )}
         {/* Chat menu */}
         <div className="relative">
           <button onClick={() => setShowChatMenu(v => !v)} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground">
@@ -2577,7 +2628,7 @@ export default function Index() {
     });
     if (getToken() && !me) {
       authApi.me().then(res => {
-        if (res.ok) setMe(res.user);
+        if (res.ok) { saveSession(getToken()!, res.user); setMe(res.user); }
         else { clearSession(); setMe(null); }
       });
     }

@@ -108,6 +108,9 @@ export const authApi = {
   me: () => call(AUTH_URL, "me", "GET"),
 
   logout: () => call(AUTH_URL, "logout", "POST"),
+
+  sessions: () => call(AUTH_URL, "sessions", "GET"),
+  logoutOther: () => call(AUTH_URL, "logout_other", "POST"),
 };
 
 // Chats
