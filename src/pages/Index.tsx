@@ -1,10 +1,32 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Component } from "react";
+import type { ReactNode } from "react";
 import Icon from "@/components/ui/icon";
 import { authApi, chatsApi, usersApi, callsApi, getToken, getStoredUser, saveSession, clearSession, setUnauthorizedHandler } from "@/lib/api";
 import type { User, Chat, Message } from "@/lib/api";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyIcon = any;
+
+// ─── Error Boundary ────────────────────────────────────────────────────────────
+class ErrorBoundary extends Component<{ children: ReactNode; fallback?: ReactNode }, { error: Error | null }> {
+  constructor(props: { children: ReactNode; fallback?: ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return this.props.fallback ?? (
+        <div className="flex flex-col items-center justify-center h-full gap-3 p-6 text-center">
+          <Icon name="AlertTriangle" size={32} className="text-red-400" />
+          <p className="text-sm text-muted-foreground">Что-то пошло не так. Попробуйте обновить страницу.</p>
+          <button onClick={() => this.setState({ error: null })} className="px-4 py-2 rounded-xl bg-secondary text-sm">Повторить</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const EMOJI_LIST = ["😀","😂","😍","🥰","😎","🤔","😢","😡","👍","👎","❤️","🔥","🎉","✅","💯","🙏","😊","🤣","😅","😭","🥳","😴","🤯","👀","💪","🚀","⭐","🌟","💎","🎵","🍕","🍔","🍺","☕","🌈","🌺","🦋","🐱","🐶","🎮"];
 
@@ -885,11 +907,11 @@ function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
       }
     };
     pc.addEventListener("icegatheringstatechange", check);
-    // Timeout 5s in case gathering never completes
+    // Timeout 3s — быстрее, достаточно для большинства сетей
     setTimeout(() => {
       pc.removeEventListener("icegatheringstatechange", check);
       resolve();
-    }, 5000);
+    }, 3000);
   });
 }
 
@@ -1439,11 +1461,23 @@ function ChatSettingsModal({ chat, onClose, onUpdated }: { chat: Chat; onClose: 
               </button>
             </div>
 
+            {chat.invite_code && (
+              <div className="bg-secondary rounded-2xl p-4">
+                <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Ссылка-приглашение</div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-mono flex-1 truncate text-violet-500">{chat.invite_code}</span>
+                  <button onClick={() => navigator.clipboard.writeText(chat.invite_code!)} className="p-2 rounded-xl hover:bg-background transition-colors">
+                    <Icon name="Copy" size={16} className="text-muted-foreground" />
+                  </button>
+                </div>
+              </div>
+            )}
+
             {isAdmin && (
               <button onClick={save} disabled={saving}
                 className="w-full py-3 rounded-2xl vm-gradient-bg text-white text-sm font-medium flex items-center justify-center gap-2">
                 {saving ? <Icon name="Loader" size={16} className="animate-spin" /> : <Icon name="Check" size={16} />}
-                Сохранить
+                Сохранить изменения
               </button>
             )}
           </div>
@@ -1478,6 +1512,123 @@ function ChatSettingsModal({ chat, onClose, onUpdated }: { chat: Chat; onClose: 
                     </button>
                   </div>
                 )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Chat Profile Modal (view info about group/channel) ───────────────────────
+function ChatProfileModal({ chat, me, onClose, onOpenSettings }: {
+  chat: Chat; me: User; onClose: () => void; onOpenSettings: () => void;
+}) {
+  const [info, setInfo] = useState<{ description?: string; members_count?: number; my_role?: string } | null>(null);
+  const [members, setMembers] = useState<{ id: number; display_name: string; avatar_color: string; avatar_url?: string; role: string; online: boolean }[]>([]);
+  const [tab, setTab] = useState<"info" | "members">("info");
+
+  useEffect(() => {
+    chatsApi.getChatInfo(chat.id).then(res => {
+      if (res.ok) setInfo(res.chat);
+    });
+    chatsApi.getMembers(chat.id).then(res => {
+      if (res.ok) setMembers(res.members);
+    });
+  }, [chat.id]);
+
+  const isAdmin = info?.my_role === "owner" || info?.my_role === "admin";
+  const count = info?.members_count ?? chat.members_count ?? 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col bg-background animate-scale-in">
+      <div className="vm-glass border-b flex items-center gap-3 px-4 py-3 safe-area-top">
+        <button onClick={onClose} className="p-2 rounded-xl hover:bg-secondary transition-colors">
+          <Icon name="ChevronLeft" size={20} />
+        </button>
+        <span className="font-semibold flex-1">{chat.type === "channel" ? "Канал" : "Группа"}</span>
+        {isAdmin && (
+          <button onClick={() => { onClose(); onOpenSettings(); }} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground">
+            <Icon name="Settings" size={18} />
+          </button>
+        )}
+      </div>
+
+      <div className="flex-1 overflow-y-auto vm-scrollbar">
+        {/* Header with avatar */}
+        <div className="vm-gradient-bg pt-8 pb-6 px-4 flex flex-col items-center gap-3">
+          <div className="w-24 h-24 rounded-full overflow-hidden shadow-2xl border-4 border-white/20">
+            {chat.avatar_url ? (
+              <img src={chat.avatar_url} alt="" className="w-full h-full object-cover" />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center text-4xl font-bold text-white" style={{ background: chat.avatar_color }}>
+                {chat.name[0]?.toUpperCase()}
+              </div>
+            )}
+          </div>
+          <div className="text-center">
+            <h2 className="text-white font-bold text-xl">{chat.name}</h2>
+            <p className="text-white/70 text-sm mt-1">
+              {chat.type === "channel" ? `${count} подписчиков` : `${count} участников`}
+            </p>
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex border-b">
+          {(["info", "members"] as const).map(t => (
+            <button key={t} onClick={() => setTab(t)}
+              className={`flex-1 py-3 text-sm font-medium transition-colors ${tab === t ? "border-b-2 border-violet-500 text-violet-500" : "text-muted-foreground"}`}>
+              {t === "info" ? "О чате" : `Участники (${count})`}
+            </button>
+          ))}
+        </div>
+
+        {tab === "info" && (
+          <div className="p-4 space-y-3">
+            {info?.description ? (
+              <div className="bg-secondary rounded-2xl p-4">
+                <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Описание</div>
+                <p className="text-sm leading-relaxed">{info.description}</p>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground text-center py-4">Описание не добавлено</p>
+            )}
+            {chat.invite_code && (
+              <div className="bg-secondary rounded-2xl p-4">
+                <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Ссылка-приглашение</div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-mono flex-1 truncate text-violet-500">{chat.invite_code}</span>
+                  <button onClick={() => navigator.clipboard.writeText(chat.invite_code!)} className="p-2 rounded-xl hover:bg-background transition-colors">
+                    <Icon name="Copy" size={16} className="text-muted-foreground" />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "members" && (
+          <div className="p-4 space-y-2">
+            {members.map(m => (
+              <div key={m.id} className="flex items-center gap-3 p-3 bg-secondary/50 rounded-2xl">
+                <div className="w-10 h-10 rounded-full overflow-hidden flex-shrink-0 relative">
+                  {m.avatar_url ? (
+                    <img src={m.avatar_url} alt="" className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-sm font-bold text-white" style={{ background: m.avatar_color }}>
+                      {m.display_name[0]?.toUpperCase()}
+                    </div>
+                  )}
+                  {m.online && <div className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-400 rounded-full border-2 border-background" />}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium truncate">{m.display_name}</div>
+                  <div className={`text-xs ${m.role === "owner" ? "text-violet-500" : m.role === "admin" ? "text-blue-500" : "text-muted-foreground"}`}>
+                    {m.role === "owner" ? "Владелец" : m.role === "admin" ? "Администратор" : "Участник"}
+                  </div>
+                </div>
               </div>
             ))}
           </div>
@@ -2203,6 +2354,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
 
   const [showCall, setShowCall] = useState<"audio" | "video" | null>(null);
   const [showChatSettings, setShowChatSettings] = useState(false);
+  const [showChatProfile, setShowChatProfile] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
   const [inviteCode, setInviteCode] = useState("");
@@ -2232,24 +2384,32 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
           const newOnes = newMsgs.slice(prevMsgCount.current);
           newOnes.forEach((m: Message) => {
             if (!m.out && notifEnabledRef.current) {
-              const notif = new Notification(`V-message: ${chat.name}`, {
-                body: m.type === "voice" ? "🎤 Голосовое сообщение" : m.type === "video_note" ? "⭕ Видеосообщение" : m.text,
-                icon: "/favicon.ico",
-                silent: false,
-              });
-              setTimeout(() => notif.close(), 4000);
+              try {
+                if (Notification.permission === "granted") {
+                  const notif = new Notification(`V-message: ${chat.name}`, {
+                    body: m.type === "voice" ? "🎤 Голосовое сообщение" : m.type === "video_note" ? "⭕ Видеосообщение" : (m.text || "Новое сообщение"),
+                    icon: "/favicon.ico",
+                    silent: false,
+                    tag: `msg-${m.id}`,
+                  });
+                  setTimeout(() => notif.close(), 4000);
+                }
+              } catch (_e) { void _e; }
               try {
                 const ctx = new AudioContext();
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
-                osc.connect(gain);
-                gain.connect(ctx.destination);
-                osc.frequency.value = 880;
-                osc.type = "sine";
-                gain.gain.setValueAtTime(0.3, ctx.currentTime);
-                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-                osc.start(ctx.currentTime);
-                osc.stop(ctx.currentTime + 0.3);
+                ctx.resume().then(() => {
+                  const osc = ctx.createOscillator();
+                  const gain = ctx.createGain();
+                  osc.connect(gain);
+                  gain.connect(ctx.destination);
+                  osc.frequency.value = 880;
+                  osc.type = "sine";
+                  gain.gain.setValueAtTime(0.3, ctx.currentTime);
+                  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+                  osc.start(ctx.currentTime);
+                  osc.stop(ctx.currentTime + 0.3);
+                  setTimeout(() => ctx.close(), 1000);
+                }).catch(() => {});
               } catch (_e) { void _e; }
             }
           });
@@ -2387,6 +2547,11 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
 
 
   const renderMessage = (m: Message) => {
+    if (!m || !m.id) return null;
+    try { return renderMessageInner(m); } catch (_e) { return null; }
+  };
+
+  const renderMessageInner = (m: Message) => {
     const isVoice = m.type === "voice";
     const isVideoNote = m.type === "video_note";
     const isImage = m.type === "image";
@@ -2540,8 +2705,8 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     return (
       <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
         <div className={`max-w-[72%] px-4 py-2.5 text-sm ${m.out ? "vm-msg-out" : "vm-msg-in dark:text-white text-gray-800"}`}>
-          {!m.out && chat.type === "group" && (
-            <div className="text-xs font-semibold mb-1" style={{ color: m.sender_color }}>{m.sender_name}</div>
+          {!m.out && (chat.type === "group" || chat.type === "channel") && m.sender_name && (
+            <div className="text-xs font-semibold mb-1" style={{ color: m.sender_color || "#8b5cf6" }}>{m.sender_name}</div>
           )}
           <p className="leading-relaxed whitespace-pre-wrap">{m.text}</p>
           <div className={`flex items-center justify-end gap-1 mt-1 ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
@@ -2564,6 +2729,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
       {showCall && chat.partner_id && <CallModal chat={chat} calleeId={chat.partner_id} type={showCall} onClose={() => setShowCall(null)} />}
       {showVideoNote && <VideoNoteRecorder onSend={sendVideoNote} onCancel={() => setShowVideoNote(false)} />}
       {showChatSettings && <ChatSettingsModal chat={chat} onClose={() => setShowChatSettings(false)} onUpdated={c => { Object.assign(chat, c); setShowChatSettings(false); }} />}
+      {showChatProfile && <ChatProfileModal chat={chat} me={me} onClose={() => setShowChatProfile(false)} onOpenSettings={() => setShowChatSettings(true)} />}
 
       {/* Invite modal */}
       {showInvite && (
@@ -2587,6 +2753,8 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
         <button onClick={() => {
           if (chat.type === "private" && chat.username) {
             onOpenProfile({ id: 0, username: chat.username, display_name: chat.name, avatar_color: chat.avatar_color, online: chat.online, status: chatStatus as "online"|"offline"|"inactive", avatar_url: chat.avatar_url });
+          } else if (chat.type !== "private") {
+            setShowChatProfile(true);
           }
         }} className="flex items-center gap-3 flex-1 min-w-0 text-left">
           <Avatar label={chat.name} color={chat.avatar_color} status={chatStatus} src={chat.avatar_url || undefined} />
@@ -2654,11 +2822,13 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
             <Icon name="Loader" size={20} className="animate-spin" />
           </div>
         )}
-        {messages.map((m, i) => (
-          <div key={m.id} style={{ animationDelay: `${Math.min(i, 10) * 0.03}s` }}>
-            {renderMessage(m)}
-          </div>
-        ))}
+        <ErrorBoundary fallback={<div className="text-center text-xs text-muted-foreground py-4">Ошибка отображения сообщений. <button onClick={() => window.location.reload()} className="underline">Обновить</button></div>}>
+          {messages.filter(m => m?.id).map((m, i) => (
+            <div key={m.id} style={{ animationDelay: `${Math.min(i, 10) * 0.03}s` }}>
+              {renderMessage(m)}
+            </div>
+          ))}
+        </ErrorBoundary>
         <div ref={bottomRef} />
       </div>
       {showScrollDown && (
@@ -2673,7 +2843,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
       {/* Input */}
       <div className="vm-glass border-t px-2 py-2 flex-shrink-0" style={{ paddingBottom: kbOffset ? `${kbOffset + 8}px` : undefined }}>
         {(() => {
-          const canWrite = chat.type === "private" || chat.members_can_write || chat.my_role === "owner" || chat.my_role === "admin";
+          const canWrite = chat.type === "private" || (chat.members_can_write ?? true) || chat.my_role === "owner" || chat.my_role === "admin";
           if (!canWrite) return (
             <div className="flex items-center justify-center py-3 text-sm text-muted-foreground gap-2">
               <Icon name="Lock" size={16} />

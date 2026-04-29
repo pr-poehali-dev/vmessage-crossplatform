@@ -433,10 +433,15 @@ def handler(event: dict, context) -> dict:
             cur.close(); conn.close()
             return resp(400, {"error": "Нужен chat_id и data"})
 
-        cur.execute(f"SELECT 1 FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
-        if not cur.fetchone():
+        cur.execute(f"SELECT cm.role, c.type, c.members_can_write FROM {SCHEMA}.vm_chat_members cm JOIN {SCHEMA}.vm_chats c ON c.id=cm.chat_id WHERE cm.chat_id=%s AND cm.user_id=%s", (chat_id, user_id))
+        member_row = cur.fetchone()
+        if not member_row:
             cur.close(); conn.close()
             return resp(403, {"error": "Нет доступа"})
+        sm_role, sm_type, sm_can_write = member_row
+        if sm_type in ("channel", "group") and not sm_can_write and sm_role not in ("owner", "admin"):
+            cur.close(); conn.close()
+            return resp(403, {"error": "Только администраторы могут писать"})
 
         folder_map = {"voice": "voice", "video_note": "video_notes", "image": "images", "video": "videos", "file": "files", "location": ""}
         folder = folder_map.get(msg_type, "files")
