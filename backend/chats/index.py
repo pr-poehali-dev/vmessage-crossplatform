@@ -441,17 +441,18 @@ def handler(event: dict, context) -> dict:
             "status": "sent", "out": True, "media_url": media_url
         }})
 
-    # get_upload_url — получить presigned URL для прямой загрузки на S3
-    if action == "get_upload_url":
+    # upload_media — прямая загрузка файла через base64 (надёжнее presigned URL)
+    if action == "upload_media":
         chat_id = body.get("chat_id")
+        data_b64 = body.get("data", "")
         mime_type = body.get("mime_type", "application/octet-stream")
         msg_type = body.get("msg_type", "file")
         filename = body.get("filename", "")
         text = body.get("text", "")
 
-        if not chat_id:
+        if not chat_id or not data_b64:
             cur.close(); conn.close()
-            return resp(400, {"error": "Нужен chat_id"})
+            return resp(400, {"error": "Нужен chat_id и data"})
 
         cur.execute(f"SELECT 1 FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
         if not cur.fetchone():
@@ -472,19 +473,16 @@ def handler(event: dict, context) -> dict:
         key = f"{folder}/{uuid.uuid4()}.{ext}"
         cdn_url = f"https://cdn.poehali.dev/projects/{os.environ['AWS_ACCESS_KEY_ID']}/bucket/{key}"
 
+        file_data = base64.b64decode(data_b64)
         s3 = boto3.client(
             "s3",
             endpoint_url="https://bucket.poehali.dev",
             aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
             aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
         )
-        upload_url = s3.generate_presigned_url(
-            "put_object",
-            Params={"Bucket": "files", "Key": key, "ContentType": mime_type},
-            ExpiresIn=300
-        )
+        s3.put_object(Bucket="files", Key=key, Body=file_data, ContentType=mime_type)
+        print(f"[UPLOAD] msg_type={msg_type} key={key} size={len(file_data)}")
 
-        # Сохраняем сообщение сразу с cdn_url
         cur.execute(
             f"INSERT INTO {SCHEMA}.vm_messages (chat_id, sender_id, msg_text, msg_type, msg_status, media_url) VALUES (%s, %s, %s, %s, 'sent', %s) RETURNING id, created_at",
             (chat_id, user_id, text, msg_type, cdn_url)
@@ -492,7 +490,7 @@ def handler(event: dict, context) -> dict:
         row = cur.fetchone()
         conn.commit()
         cur.close(); conn.close()
-        return resp(200, {"ok": True, "upload_url": upload_url, "cdn_url": cdn_url, "message": {
+        return resp(200, {"ok": True, "message": {
             "id": row[0], "time": row[1].strftime("%H:%M"),
             "text": text, "type": msg_type,
             "status": "sent", "out": True, "media_url": cdn_url

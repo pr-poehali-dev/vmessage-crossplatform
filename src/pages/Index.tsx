@@ -2075,14 +2075,18 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     } catch (e) { console.error("[VOICE] error", e); }
   };
 
-  // Универсальная загрузка через presigned URL — минует лимит тела функции
+  // Универсальная загрузка файла через base64 → бэкенд → S3
   const uploadMedia = async (blob: Blob, mimeType: string, msgType: string, text: string, filename: string) => {
     const chatId = chat.id;
-    // Убираем кодеки из mimeType для S3 — только base тип (video/webm, не video/webm;codecs=vp8)
     const baseMime = mimeType.split(";")[0].trim();
-    const res = await chatsApi.getUploadUrl(chatId, baseMime, msgType, text, filename);
-    if (!res?.ok) throw new Error(res?.error || "upload_url failed");
-    await fetch(res.upload_url, { method: "PUT", body: blob, headers: { "Content-Type": baseMime } });
+    const base64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve((reader.result as string).split(",")[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+    const res = await chatsApi.uploadMedia(chatId, base64, baseMime, msgType, text, filename);
+    if (!res?.ok) throw new Error(res?.error || "upload failed");
     return res.message;
   };
 
