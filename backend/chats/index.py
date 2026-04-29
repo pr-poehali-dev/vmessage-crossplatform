@@ -458,7 +458,7 @@ def handler(event: dict, context) -> dict:
             cur.close(); conn.close()
             return resp(403, {"error": "Нет доступа"})
 
-        folder_map = {"voice": "voice", "video_note": "video_notes", "image": "images", "video": "videos", "file": "files"}
+        folder_map = {"voice": "voice", "video_note": "video_notes", "image": "images", "video": "videos", "file": "files", "audio": "audio"}
         folder = folder_map.get(msg_type, "files")
 
         if filename and "." in filename:

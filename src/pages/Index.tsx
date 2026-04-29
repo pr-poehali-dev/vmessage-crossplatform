@@ -469,9 +469,17 @@ function VideoNoteRecorder({ onSend, onCancel }: {
   const startRec = () => {
     const stream = streamRef.current;
     if (!stream || phase !== "ready") return;
-    // Предпочитаем mp4 (Safari/iOS), затем чистый webm без кодеков
-    const mimeType = ["video/mp4", "video/webm", ""]
-      .find(t => !t || MediaRecorder.isTypeSupported(t)) ?? "";
+    // Порядок приоритета: mp4 (совместим с Safari/iOS/Chrome), затем webm
+    const mimeType = [
+      "video/mp4;codecs=avc1,mp4a.40.2",
+      "video/mp4;codecs=avc1",
+      "video/mp4",
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/webm",
+      ""
+    ].find(t => !t || MediaRecorder.isTypeSupported(t)) ?? "";
+    console.log("[VIDEO REC] selected mimeType:", mimeType || "(default)");
     const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
     mrRef.current = mr;
     chunksRef.current = [];
@@ -563,17 +571,18 @@ function VideoNoteMessage({ m }: { m: Message }) {
   const [open, setOpen] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [canPlay, setCanPlay] = useState<boolean | null>(null);
+  const [videoError, setVideoError] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const fullRef = useRef<HTMLVideoElement>(null);
 
   const togglePlay = (e: { stopPropagation: () => void }) => {
     e.stopPropagation();
-    setOpen(true);
+    if (!videoError) setOpen(true);
   };
 
   useEffect(() => {
     if (open && fullRef.current) {
+      fullRef.current.load();
       fullRef.current.play().then(() => setPlaying(true)).catch(() => {});
     }
   }, [open]);
@@ -602,23 +611,28 @@ function VideoNoteMessage({ m }: { m: Message }) {
         <div className="flex flex-col items-center gap-1">
           <div
             onClick={m.media_url ? togglePlay : undefined}
-            className={`w-[140px] h-[140px] rounded-full overflow-hidden relative shadow-xl ${m.media_url ? "cursor-pointer" : ""} ${m.out ? "border-[3px] border-violet-400/60" : "border-[3px] border-white dark:border-gray-600"}`}
+            className={`w-[140px] h-[140px] rounded-full overflow-hidden relative shadow-xl ${m.media_url && !videoError ? "cursor-pointer" : ""} ${m.out ? "border-[3px] border-violet-400/60" : "border-[3px] border-white dark:border-gray-600"}`}
           >
             {m.media_url ? (
               <>
-                <video
-                  ref={videoRef}
-                  src={m.media_url}
-                  className="w-full h-full object-cover"
-                  muted playsInline preload="metadata"
-                  onCanPlay={() => setCanPlay(true)}
-                  onError={() => setCanPlay(false)}
-                />
-                {canPlay === false ? (
-                  <div className="absolute inset-0 bg-violet-900/80 flex flex-col items-center justify-center gap-2">
+                {!videoError ? (
+                  <video
+                    ref={videoRef}
+                    className="w-full h-full object-cover"
+                    muted playsInline preload="metadata"
+                    onError={() => setVideoError(true)}
+                  >
+                    <source src={m.media_url} type="video/mp4" />
+                    <source src={m.media_url} type="video/webm" />
+                  </video>
+                ) : (
+                  <div className="w-full h-full bg-violet-900/60" />
+                )}
+                {videoError ? (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-violet-900/80">
                     <Icon name="Video" size={28} className="text-white/70" />
                     <a href={m.media_url} target="_blank" rel="noreferrer"
-                      className="text-white text-[11px] underline underline-offset-2 px-2 text-center"
+                      className="text-white text-[11px] underline underline-offset-2 px-2 text-center leading-tight"
                       onClick={e => e.stopPropagation()}>
                       Открыть
                     </a>
@@ -630,7 +644,7 @@ function VideoNoteMessage({ m }: { m: Message }) {
                     </div>
                   </div>
                 )}
-                {dur > 0 && (
+                {dur > 0 && !videoError && (
                   <div className="absolute bottom-4 left-0 right-0 flex justify-center">
                     <span className="text-white text-[11px] font-semibold drop-shadow">{fmt(dur)}</span>
                   </div>
@@ -661,12 +675,15 @@ function VideoNoteMessage({ m }: { m: Message }) {
             <div className="relative w-72 h-72 rounded-full overflow-hidden shadow-2xl">
               <video
                 ref={fullRef}
-                src={m.media_url}
                 className="w-full h-full object-cover"
                 playsInline
                 onTimeUpdate={onTimeUpdate}
                 onEnded={onEnded}
-              />
+                onError={() => { setVideoError(true); setOpen(false); }}
+              >
+                <source src={m.media_url} type="video/mp4" />
+                <source src={m.media_url} type="video/webm" />
+              </video>
               <svg className="absolute inset-0 w-full h-full -rotate-90 pointer-events-none" viewBox="0 0 100 100">
                 <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="3" />
                 <circle cx="50" cy="50" r="48" fill="none" stroke="white" strokeWidth="3"
@@ -683,12 +700,19 @@ function VideoNoteMessage({ m }: { m: Message }) {
                 </div>
               </button>
             </div>
-            <button
-              onClick={() => { fullRef.current?.pause(); setOpen(false); setPlaying(false); setProgress(0); }}
-              className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center text-white hover:bg-white/30 transition-colors"
-            >
-              <Icon name="X" size={18} />
-            </button>
+            <div className="flex items-center gap-3">
+              <a href={m.media_url} target="_blank" rel="noreferrer"
+                className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center text-white hover:bg-white/30 transition-colors"
+                onClick={e => e.stopPropagation()}>
+                <Icon name="Download" size={16} />
+              </a>
+              <button
+                onClick={() => { fullRef.current?.pause(); setOpen(false); setPlaying(false); setProgress(0); }}
+                className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center text-white hover:bg-white/30 transition-colors"
+              >
+                <Icon name="X" size={18} />
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2081,8 +2105,9 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     if (msgType === "file") {
       if (file.type.startsWith("image/")) type = "image";
       else if (file.type.startsWith("video/")) type = "video";
+      else if (file.type.startsWith("audio/")) type = "audio";
     }
-    const prefix = type === "image" ? "📷" : type === "video" ? "🎬" : "📎";
+    const prefix = type === "image" ? "📷" : type === "video" ? "🎬" : type === "audio" ? "🎵" : "📎";
     const mimeType = file.type || "application/octet-stream";
     try {
       const msg = await uploadMedia(file, mimeType, type, `${prefix} ${file.name}`, file.name);
@@ -2122,6 +2147,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     const isImage = m.type === "image";
     const isVideo = m.type === "video";
     const isFile = m.type === "file";
+    const isAudio = m.type === "audio";
     const isLocation = m.type === "location";
     const hasMedia = m.media_url;
 
@@ -2174,7 +2200,10 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
       return (
         <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
           <div className="max-w-[240px]">
-            <video src={m.media_url} className="rounded-2xl w-full max-h-48 object-cover" controls playsInline />
+            <video className="rounded-2xl w-full max-h-48 bg-black" controls playsInline preload="metadata">
+              <source src={m.media_url} type="video/mp4" />
+              <source src={m.media_url} type="video/webm" />
+            </video>
             <div className={`flex items-center justify-end gap-1 mt-1 text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
               <span>{m.time}</span>
               {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={10} className="text-cyan-300" /> : <Icon name="CheckCheck" size={10} />)}
@@ -2184,19 +2213,46 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
       );
     }
 
-    if (isFile) {
+    if (isAudio && hasMedia) {
+      const fname = m.text?.replace("🎵 ", "") || "Аудио";
       return (
         <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
-          <div className={`flex items-center gap-3 px-4 py-3 rounded-2xl max-w-[220px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
-            <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${m.out ? "bg-white/20" : "bg-violet-100 dark:bg-violet-900"}`}>
-              <Icon name="FileText" size={16} className={m.out ? "text-white" : "text-violet-500"} />
+          <div className={`flex flex-col gap-1.5 px-3 py-2.5 rounded-2xl max-w-[260px] w-[230px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
+            <div className="flex items-center gap-2">
+              <Icon name="Music" size={14} className={m.out ? "text-white/70" : "text-violet-400"} />
+              <span className="text-xs font-medium truncate flex-1">{fname}</span>
+            </div>
+            <audio controls preload="metadata" className="w-full h-8" style={{ colorScheme: "dark" }}>
+              <source src={m.media_url} />
+            </audio>
+            <div className={`flex items-center justify-end gap-1 text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
+              <span>{m.time}</span>
+              {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={10} className="text-cyan-300" /> : <Icon name="CheckCheck" size={10} />)}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (isFile) {
+      const fname = m.text?.replace(/^[\u{1F4CE}\u{1F4F7}\u{1F3AC}\u{1F3B5}]\s?/u, "") || "Файл";
+      const ext = fname.includes(".") ? fname.split(".").pop()?.toLowerCase() : "";
+      const iconName = ext === "pdf" ? "FileText" : ext === "zip" || ext === "rar" || ext === "7z" ? "Archive" : ext === "apk" ? "Smartphone" : ext === "doc" || ext === "docx" ? "FileText" : "File";
+      return (
+        <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
+          <div className={`flex items-center gap-3 px-4 py-3 rounded-2xl max-w-[240px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${m.out ? "bg-white/20" : "bg-violet-100 dark:bg-violet-900"}`}>
+              <Icon name={iconName as AnyIcon} size={18} className={m.out ? "text-white" : "text-violet-500"} />
             </div>
             <div className="flex-1 min-w-0">
-              <div className="text-xs font-medium truncate">{m.text?.replace("📎 ", "") || "Файл"}</div>
-              <button onClick={() => hasMedia && window.open(m.media_url, "_blank")}
-                className={`text-[10px] underline ${m.out ? "text-white/70" : "text-violet-500"}`}>
-                Скачать
-              </button>
+              <div className="text-xs font-medium truncate">{fname}</div>
+              <div className="flex items-center gap-2 mt-0.5">
+                {ext && <span className={`text-[10px] uppercase font-bold ${m.out ? "text-white/50" : "text-muted-foreground"}`}>{ext}</span>}
+                <button onClick={() => hasMedia && window.open(m.media_url, "_blank")}
+                  className={`text-[10px] underline ${m.out ? "text-white/70" : "text-violet-500"}`}>
+                  Скачать
+                </button>
+              </div>
             </div>
           </div>
         </div>
