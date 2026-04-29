@@ -2500,7 +2500,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
 
         <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={e => e.target.files?.[0] && sendFile(e.target.files[0], "image")} />
         <input ref={videoInputRef} type="file" accept="video/*" className="hidden" onChange={e => e.target.files?.[0] && sendFile(e.target.files[0], "video")} />
-        <input ref={docInputRef} type="file" accept="*/*" className="hidden" onChange={e => e.target.files?.[0] && sendFile(e.target.files[0], "file")} />
+        <input ref={docInputRef} type="file" className="hidden" onChange={e => e.target.files?.[0] && sendFile(e.target.files[0], "file")} />
       </div>
 
       {(showAttachMenu || showEmoji) && (
