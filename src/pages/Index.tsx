@@ -856,8 +856,11 @@ function UserProfileModal({ user: initialUser, onClose, onStartChat, currentUser
 const ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
-  { urls: "stun:stun3.l.google.com:19302" },
+  { urls: "stun:stun.relay.metered.ca:80" },
+  { urls: "turn:global.relay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:global.relay.metered.ca:80?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:global.relay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:global.relay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
 ];
 
 async function getMedia(isVideo: boolean): Promise<MediaStream> {
@@ -1304,6 +1307,180 @@ function ActiveSessionsModal({ onClose }: { onClose: () => void }) {
         )}
         {!loading && otherCount === 0 && (
           <p className="text-xs text-muted-foreground mt-4 text-center">Других активных сессий нет</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Chat Settings Modal ──────────────────────────────────────────────────────
+function ChatSettingsModal({ chat, onClose, onUpdated }: { chat: Chat; onClose: () => void; onUpdated: (c: Chat) => void }) {
+  const [tab, setTab] = useState<"info" | "members">("info");
+  const [name, setName] = useState(chat.name);
+  const [description, setDescription] = useState("");
+  const [membersCanWrite, setMembersCanWrite] = useState(chat.members_can_write ?? true);
+  const [members, setMembers] = useState<{ id: number; username: string; display_name: string; avatar_color: string; avatar_url?: string; role: string; online: boolean }[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [membersCount, setMembersCount] = useState(chat.members_count ?? 0);
+  const [myRole, setMyRole] = useState(chat.my_role ?? "member");
+  const avatarInputRef = useRef<HTMLInputElement>(null);
+  const isAdmin = myRole === "owner" || myRole === "admin";
+
+  useEffect(() => {
+    chatsApi.getChatInfo(chat.id).then(res => {
+      if (res.ok) {
+        setDescription(res.chat.description || "");
+        setMembersCanWrite(res.chat.members_can_write ?? true);
+        setMembersCount(res.chat.members_count);
+        setMyRole(res.chat.my_role);
+      }
+    });
+    chatsApi.getMembers(chat.id).then(res => {
+      if (res.ok) setMembers(res.members);
+    });
+  }, [chat.id]);
+
+  const save = async () => {
+    setSaving(true);
+    const res = await chatsApi.updateChat(chat.id, { name, description, members_can_write: membersCanWrite });
+    if (res.ok) onUpdated({ ...chat, name, members_can_write: membersCanWrite, avatar_url: res.chat.avatar_url || chat.avatar_url });
+    setSaving(false);
+  };
+
+  const uploadAvatar = async (file: File) => {
+    setUploadingAvatar(true);
+    const base64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve((reader.result as string).split(",")[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    const res = await chatsApi.updateChat(chat.id, { avatar_data: base64, avatar_mime: file.type });
+    if (res.ok) onUpdated({ ...chat, avatar_url: res.chat.avatar_url });
+    setUploadingAvatar(false);
+  };
+
+  const setRole = async (userId: number, role: string) => {
+    await chatsApi.setMemberRole(chat.id, userId, role);
+    setMembers(m => m.map(mb => mb.id === userId ? { ...mb, role } : mb));
+  };
+
+  const kick = async (userId: number) => {
+    await chatsApi.kickMember(chat.id, userId);
+    setMembers(m => m.filter(mb => mb.id !== userId));
+    setMembersCount(c => c - 1);
+  };
+
+  const roleLabel = (r: string) => r === "owner" ? "Владелец" : r === "admin" ? "Админ" : "Участник";
+  const roleColor = (r: string) => r === "owner" ? "text-violet-500" : r === "admin" ? "text-blue-500" : "text-muted-foreground";
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col bg-background animate-scale-in">
+      <div className="vm-glass border-b flex items-center gap-3 px-4 py-3 safe-area-top">
+        <button onClick={onClose} className="p-2 rounded-xl hover:bg-secondary transition-colors">
+          <Icon name="ChevronLeft" size={20} />
+        </button>
+        <span className="font-semibold flex-1">Настройки {chat.type === "channel" ? "канала" : "группы"}</span>
+      </div>
+
+      <div className="flex border-b">
+        {(["info", "members"] as const).map(t => (
+          <button key={t} onClick={() => setTab(t)}
+            className={`flex-1 py-3 text-sm font-medium transition-colors ${tab === t ? "border-b-2 border-violet-500 text-violet-500" : "text-muted-foreground"}`}>
+            {t === "info" ? "Основное" : `Участники (${membersCount})`}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1 overflow-y-auto vm-scrollbar p-4">
+        {tab === "info" && (
+          <div className="space-y-4">
+            <div className="flex flex-col items-center gap-3">
+              <div className="relative cursor-pointer" onClick={() => isAdmin && avatarInputRef.current?.click()}>
+                <div className="w-20 h-20 rounded-full overflow-hidden shadow-xl">
+                  {chat.avatar_url ? (
+                    <img src={chat.avatar_url} alt="" className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-2xl font-bold text-white" style={{ background: chat.avatar_color }}>
+                      {chat.name[0]?.toUpperCase()}
+                    </div>
+                  )}
+                </div>
+                {isAdmin && (
+                  <div className="absolute -bottom-1 -right-1 w-7 h-7 rounded-full bg-violet-500 flex items-center justify-center shadow">
+                    {uploadingAvatar ? <Icon name="Loader" size={14} className="text-white animate-spin" /> : <Icon name="Camera" size={14} className="text-white" />}
+                  </div>
+                )}
+              </div>
+              <input ref={avatarInputRef} type="file" accept="image/*" className="hidden" onChange={e => e.target.files?.[0] && uploadAvatar(e.target.files[0])} />
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Название</label>
+              <input value={name} onChange={e => setName(e.target.value)} disabled={!isAdmin}
+                className="w-full bg-secondary rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-violet-500/30 disabled:opacity-60" />
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Описание</label>
+              <textarea value={description} onChange={e => setDescription(e.target.value)} disabled={!isAdmin} rows={3}
+                className="w-full bg-secondary rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-violet-500/30 resize-none disabled:opacity-60" />
+            </div>
+
+            <div className="flex items-center justify-between p-4 bg-secondary rounded-2xl">
+              <div>
+                <div className="text-sm font-medium">Участники могут писать</div>
+                <div className="text-xs text-muted-foreground">{chat.type === "channel" ? "В канале пишут все подписчики" : "В группе пишут все участники"}</div>
+              </div>
+              <button onClick={() => isAdmin && setMembersCanWrite(v => !v)} disabled={!isAdmin}
+                className={`w-11 h-6 rounded-full transition-all duration-300 flex items-center px-1 disabled:opacity-60 ${membersCanWrite ? "vm-gradient-bg" : "bg-muted"}`}>
+                <div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-300 ${membersCanWrite ? "translate-x-5" : "translate-x-0"}`} />
+              </button>
+            </div>
+
+            {isAdmin && (
+              <button onClick={save} disabled={saving}
+                className="w-full py-3 rounded-2xl vm-gradient-bg text-white text-sm font-medium flex items-center justify-center gap-2">
+                {saving ? <Icon name="Loader" size={16} className="animate-spin" /> : <Icon name="Check" size={16} />}
+                Сохранить
+              </button>
+            )}
+          </div>
+        )}
+
+        {tab === "members" && (
+          <div className="space-y-2">
+            {members.map(m => (
+              <div key={m.id} className="flex items-center gap-3 p-3 bg-secondary/50 rounded-2xl">
+                <div className="w-10 h-10 rounded-full overflow-hidden flex-shrink-0">
+                  {m.avatar_url ? (
+                    <img src={m.avatar_url} alt="" className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-sm font-bold text-white" style={{ background: m.avatar_color }}>
+                      {m.display_name[0]?.toUpperCase()}
+                    </div>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium truncate">{m.display_name}</div>
+                  <div className={`text-xs ${roleColor(m.role)}`}>{roleLabel(m.role)}</div>
+                </div>
+                {isAdmin && m.role !== "owner" && (
+                  <div className="flex gap-1">
+                    <button onClick={() => setRole(m.id, m.role === "admin" ? "member" : "admin")}
+                      className="p-1.5 rounded-lg hover:bg-secondary transition-colors text-muted-foreground" title={m.role === "admin" ? "Снять права" : "Сделать админом"}>
+                      <Icon name={m.role === "admin" ? "ShieldOff" : "Shield"} size={14} />
+                    </button>
+                    <button onClick={() => kick(m.id)}
+                      className="p-1.5 rounded-lg hover:bg-red-100 dark:hover:bg-red-900/20 transition-colors text-red-500" title="Исключить">
+                      <Icon name="UserMinus" size={14} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         )}
       </div>
     </div>
@@ -1863,6 +2040,12 @@ function SettingsSection() {
   const [notifications, setNotifications] = useState(false);
   const [showSessions, setShowSessions] = useState(false);
   const [notifStatus, setNotifStatus] = useState<"default" | "granted" | "denied">("default");
+  const [lang, setLang] = useState<"ru" | "en">(() => (localStorage.getItem("vm_lang") as "ru" | "en") || "ru");
+
+  const switchLang = (l: "ru" | "en") => {
+    setLang(l);
+    localStorage.setItem("vm_lang", l);
+  };
 
   useEffect(() => {
     if ("Notification" in window) {
@@ -1948,12 +2131,27 @@ function SettingsSection() {
         </div>
       ))}
 
+      <div className="mx-4 mt-4 bg-card rounded-3xl p-2">
+        <div className="px-3 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Язык / Language</div>
+        <div className="flex gap-2 px-3 pb-3">
+          {(["ru", "en"] as const).map(l => (
+            <button key={l} onClick={() => switchLang(l)}
+              className={`flex-1 py-2.5 rounded-2xl text-sm font-medium transition-colors ${lang === l ? "vm-gradient-bg text-white" : "bg-secondary text-foreground hover:bg-secondary/80"}`}>
+              {l === "ru" ? "🇷🇺 Русский" : "🇬🇧 English"}
+            </button>
+          ))}
+        </div>
+        {lang === "en" && (
+          <p className="text-xs text-muted-foreground px-3 pb-3">Full English interface coming soon. Basic support enabled.</p>
+        )}
+      </div>
+
       <div className="mx-4 mt-4 bg-card rounded-3xl p-4">
         <div className="flex items-center gap-2 mb-1">
           <Icon name="Info" size={15} className="text-violet-500" />
-          <span className="text-sm font-medium">О приложении</span>
+          <span className="text-sm font-medium">{lang === "en" ? "About" : "О приложении"}</span>
         </div>
-        <p className="text-xs text-muted-foreground ml-6">V-message v1.0 · Мессенджер нового поколения</p>
+        <p className="text-xs text-muted-foreground ml-6">V-message v1.0 · {lang === "en" ? "Next-generation messenger" : "Мессенджер нового поколения"}</p>
       </div>
     </div>
   );
@@ -2004,6 +2202,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
   }, []);
 
   const [showCall, setShowCall] = useState<"audio" | "video" | null>(null);
+  const [showChatSettings, setShowChatSettings] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
   const [inviteCode, setInviteCode] = useState("");
@@ -2364,6 +2563,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     <div className="flex flex-col h-full animate-scale-in">
       {showCall && chat.partner_id && <CallModal chat={chat} calleeId={chat.partner_id} type={showCall} onClose={() => setShowCall(null)} />}
       {showVideoNote && <VideoNoteRecorder onSend={sendVideoNote} onCancel={() => setShowVideoNote(false)} />}
+      {showChatSettings && <ChatSettingsModal chat={chat} onClose={() => setShowChatSettings(false)} onUpdated={c => { Object.assign(chat, c); setShowChatSettings(false); }} />}
 
       {/* Invite modal */}
       {showInvite && (
@@ -2393,14 +2593,19 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
           <div className="flex-1 min-w-0">
             <div className="font-semibold text-sm truncate">{chat.name}</div>
             <div className={`text-xs ${chatStatus === "online" ? "text-emerald-500" : "text-muted-foreground"}`}>
-              {chat.type === "group" ? "группа" : chat.type === "channel" ? "канал" : statusLabel(chatStatus)}
+              {chat.type === "group" ? `группа · ${chat.members_count ?? ""} уч.` : chat.type === "channel" ? `канал · ${chat.members_count ?? ""} подп.` : statusLabel(chatStatus)}
             </div>
           </div>
         </button>
         {chat.type !== "private" && (
-          <button onClick={loadInvite} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground" title="Ссылка-приглашение">
-            <Icon name="Link" size={18} />
-          </button>
+          <>
+            <button onClick={() => setShowChatSettings(true)} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground" title="Настройки">
+              <Icon name="Settings" size={18} />
+            </button>
+            <button onClick={loadInvite} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground" title="Ссылка-приглашение">
+              <Icon name="Link" size={18} />
+            </button>
+          </>
         )}
         {chat.type === "private" && chat.partner_id && (
           <>
@@ -2467,9 +2672,16 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
 
       {/* Input */}
       <div className="vm-glass border-t px-2 py-2 flex-shrink-0" style={{ paddingBottom: kbOffset ? `${kbOffset + 8}px` : undefined }}>
-        {recording ? (
-          <VoiceRecorder onSend={sendVoice} onCancel={() => setRecording(false)} />
-        ) : (
+        {(() => {
+          const canWrite = chat.type === "private" || chat.members_can_write || chat.my_role === "owner" || chat.my_role === "admin";
+          if (!canWrite) return (
+            <div className="flex items-center justify-center py-3 text-sm text-muted-foreground gap-2">
+              <Icon name="Lock" size={16} />
+              {chat.type === "channel" ? "Только администраторы могут писать в этот канал" : "Запись в группу ограничена"}
+            </div>
+          );
+          if (recording) return <VoiceRecorder onSend={sendVoice} onCancel={() => setRecording(false)} />;
+          return (
           <div className="flex items-center gap-1 w-full">
             {/* Attach + Emoji в одном меню */}
             <div className="relative flex-shrink-0">
@@ -2547,7 +2759,8 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
               </>
             )}
           </div>
-        )}
+          );
+        })()}
 
         <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={e => e.target.files?.[0] && sendFile(e.target.files[0], "image")} />
         <input ref={videoInputRef} type="file" accept="video/*" className="hidden" onChange={e => e.target.files?.[0] && sendFile(e.target.files[0], "video")} />

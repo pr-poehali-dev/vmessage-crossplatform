@@ -58,6 +58,9 @@ export interface Chat {
   is_public?: boolean;
   invite_code?: string;
   partner_last_seen?: string;
+  members_count?: number;
+  my_role?: string;
+  members_can_write?: boolean;
 }
 
 export interface Message {
@@ -158,6 +161,21 @@ export const chatsApi = {
 
   deleteChat: (chat_id: number) =>
     call(CHATS_URL, "delete_chat", "POST", { chat_id }),
+
+  getChatInfo: (chat_id: number) =>
+    call(CHATS_URL, "get_chat_info", "GET", undefined, undefined, { chat_id: String(chat_id) }),
+
+  getMembers: (chat_id: number) =>
+    call(CHATS_URL, "get_members", "GET", undefined, undefined, { chat_id: String(chat_id) }),
+
+  updateChat: (chat_id: number, data: { name?: string; description?: string; members_can_write?: boolean; avatar_data?: string; avatar_mime?: string }) =>
+    call(CHATS_URL, "update_chat", "POST", { chat_id, ...data }),
+
+  setMemberRole: (chat_id: number, user_id: number, role: string) =>
+    call(CHATS_URL, "set_member_role", "POST", { chat_id, user_id, role }),
+
+  kickMember: (chat_id: number, user_id: number) =>
+    call(CHATS_URL, "kick_member", "POST", { chat_id, user_id }),
 };
 
 // Users

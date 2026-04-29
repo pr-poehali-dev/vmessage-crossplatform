@@ -29,7 +29,13 @@ def resp(status: int, body: dict) -> dict:
 def get_user_by_token(cur, token: str):
     if not token:
         return None
-    cur.execute(f"SELECT id, username, display_name, avatar_color, bio, avatar_url FROM {SCHEMA}.vm_users WHERE session_token=%s AND is_active=TRUE", (token,))
+    cur.execute(
+        f"""SELECT u.id, u.username, u.display_name, u.avatar_color, u.bio, u.avatar_url
+            FROM {SCHEMA}.vm_sessions s
+            JOIN {SCHEMA}.vm_users u ON u.id = s.user_id
+            WHERE s.token = %s AND u.is_active = TRUE""",
+        (token,)
+    )
     return cur.fetchone()
 
 
@@ -72,14 +78,16 @@ def handler(event: dict, context) -> dict:
     conn = get_conn()
     cur = conn.cursor()
 
-    # set_status — обновить онлайн-статус (не требует полного get_user_by_token для скорости)
+    # set_status — обновить онлайн-статус
     if action == "set_status":
         if not token:
             cur.close(); conn.close()
             return resp(401, {"error": "Не авторизован"})
         is_online = body.get("online", True)
         cur.execute(
-            f"UPDATE {SCHEMA}.vm_users SET is_online=%s, last_seen=NOW() WHERE session_token=%s AND is_active=TRUE",
+            f"""UPDATE {SCHEMA}.vm_users SET is_online=%s, last_seen=NOW()
+                WHERE id=(SELECT user_id FROM {SCHEMA}.vm_sessions WHERE token=%s LIMIT 1)
+                AND is_active=TRUE""",
             (is_online, token)
         )
         conn.commit()

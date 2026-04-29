@@ -29,7 +29,13 @@ def resp(status: int, body: dict) -> dict:
 def get_user_by_token(cur, token: str):
     if not token:
         return None
-    cur.execute(f"SELECT id, username, display_name, avatar_color FROM {SCHEMA}.vm_users WHERE session_token=%s AND is_active=TRUE", (token,))
+    cur.execute(
+        f"""SELECT u.id, u.username, u.display_name, u.avatar_color
+            FROM {SCHEMA}.vm_sessions s
+            JOIN {SCHEMA}.vm_users u ON u.id = s.user_id
+            WHERE s.token = %s AND u.is_active = TRUE""",
+        (token,)
+    )
     return cur.fetchone()
 
 
@@ -119,7 +125,11 @@ def handler(event: dict, context) -> dict:
                 c.is_public,
                 c.invite_code,
                 u2.last_seen AS partner_last_seen,
-                u2.id AS partner_id
+                u2.id AS partner_id,
+                c.avatar_url AS chat_avatar_url,
+                (SELECT COUNT(*) FROM {SCHEMA}.vm_chat_members WHERE chat_id=c.id) AS members_count,
+                cm.role AS my_role,
+                c.members_can_write
             FROM {SCHEMA}.vm_chats c
             JOIN {SCHEMA}.vm_chat_members cm ON cm.chat_id=c.id AND cm.user_id=%s
             LEFT JOIN {SCHEMA}.vm_chat_members cm2 ON cm2.chat_id=c.id AND cm2.user_id != %s AND c.type='private'
@@ -151,13 +161,16 @@ def handler(event: dict, context) -> dict:
                 "partner_id": r[16] if is_private else None,
                 "online": partner_online if is_private else False,
                 "user_status": status,
-                "avatar_url": r[9] if is_private else None,
+                "avatar_url": r[9] if is_private else r[17],
                 "last_msg": r[10] or "",
                 "last_time": r[11].strftime("%H:%M") if r[11] else "",
                 "unread": int(r[12]) if r[12] else 0,
                 "is_public": bool(r[13]),
                 "invite_code": r[14],
                 "partner_last_seen": r[15].isoformat() if r[15] else None,
+                "members_count": int(r[18]) if r[18] else 0,
+                "my_role": r[19],
+                "members_can_write": bool(r[20]) if r[20] is not None else True,
             })
         cur.close()
         conn.close()
@@ -369,10 +382,15 @@ def handler(event: dict, context) -> dict:
             cur.close(); conn.close()
             return resp(400, {"error": "Нужен chat_id и text"})
 
-        cur.execute(f"SELECT 1 FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
-        if not cur.fetchone():
+        cur.execute(f"SELECT cm.role, c.type, c.members_can_write FROM {SCHEMA}.vm_chat_members cm JOIN {SCHEMA}.vm_chats c ON c.id=cm.chat_id WHERE cm.chat_id=%s AND cm.user_id=%s", (chat_id, user_id))
+        member_row = cur.fetchone()
+        if not member_row:
             cur.close(); conn.close()
             return resp(403, {"error": "Нет доступа"})
+        role, chat_type, members_can_write = member_row
+        if chat_type in ("channel", "group") and not members_can_write and role not in ("owner", "admin"):
+            cur.close(); conn.close()
+            return resp(403, {"error": "Только администраторы могут писать"})
 
         # Проверяем блокировку в приватном чате
         cur.execute(f"""
@@ -560,6 +578,147 @@ def handler(event: dict, context) -> dict:
                 cur.execute(f"DELETE FROM {SCHEMA}.vm_messages WHERE chat_id=%s", (chat_id_val,))
                 cur.execute(f"DELETE FROM {SCHEMA}.vm_chats WHERE id=%s", (chat_id_val,))
 
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
+
+    # get_chat_info — информация о чате с числом участников и своей ролью
+    if action == "get_chat_info":
+        chat_id = qs.get("chat_id") or body.get("chat_id")
+        if not chat_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нет chat_id"})
+        cur.execute(
+            f"SELECT c.id, c.type, c.name, c.description, c.avatar_color, c.avatar_url, c.is_public, c.invite_code, c.members_can_write, cm.role FROM {SCHEMA}.vm_chats c JOIN {SCHEMA}.vm_chat_members cm ON cm.chat_id=c.id WHERE c.id=%s AND cm.user_id=%s",
+            (chat_id, user_id)
+        )
+        row = cur.fetchone()
+        if not row:
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нет доступа"})
+        cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s", (chat_id,))
+        count = cur.fetchone()[0]
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "chat": {
+            "id": row[0], "type": row[1], "name": row[2], "description": row[3],
+            "avatar_color": row[4], "avatar_url": row[5], "is_public": row[6],
+            "invite_code": row[7], "members_can_write": row[8], "my_role": row[9],
+            "members_count": int(count)
+        }})
+
+    # get_members — список участников
+    if action == "get_members":
+        chat_id = qs.get("chat_id") or body.get("chat_id")
+        if not chat_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нет chat_id"})
+        cur.execute(f"SELECT 1 FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нет доступа"})
+        cur.execute(
+            f"""SELECT u.id, u.username, u.display_name, u.avatar_color, u.avatar_url, cm.role, u.is_online
+                FROM {SCHEMA}.vm_chat_members cm
+                JOIN {SCHEMA}.vm_users u ON u.id=cm.user_id
+                WHERE cm.chat_id=%s ORDER BY cm.role DESC, u.display_name ASC""",
+            (chat_id,)
+        )
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        members = [{"id": r[0], "username": r[1], "display_name": r[2], "avatar_color": r[3], "avatar_url": r[4], "role": r[5], "online": bool(r[6])} for r in rows]
+        return resp(200, {"ok": True, "members": members})
+
+    # update_chat — обновить название, описание, аватар, права записи
+    if action == "update_chat":
+        chat_id = body.get("chat_id")
+        if not chat_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нет chat_id"})
+        cur.execute(f"SELECT role FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
+        row = cur.fetchone()
+        if not row or row[0] not in ("owner", "admin"):
+            cur.close(); conn.close()
+            return resp(403, {"error": "Только администраторы могут редактировать чат"})
+
+        updates = []
+        params = []
+        if "name" in body and body["name"]:
+            updates.append("name=%s"); params.append(body["name"][:100])
+        if "description" in body:
+            updates.append("description=%s"); params.append(body["description"][:500])
+        if "members_can_write" in body:
+            updates.append("members_can_write=%s"); params.append(bool(body["members_can_write"]))
+        if "avatar_data" in body and body["avatar_data"]:
+            mime = body.get("avatar_mime", "image/jpeg")
+            avatar_url = upload_to_s3(body["avatar_data"], mime, "chat_avatars")
+            updates.append("avatar_url=%s"); params.append(avatar_url)
+
+        if updates:
+            params.append(chat_id)
+            cur.execute(f"UPDATE {SCHEMA}.vm_chats SET {', '.join(updates)} WHERE id=%s", params)
+            conn.commit()
+
+        cur.execute(f"SELECT id, type, name, description, avatar_color, avatar_url, is_public, members_can_write FROM {SCHEMA}.vm_chats WHERE id=%s", (chat_id,))
+        r = cur.fetchone()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "chat": {"id": r[0], "type": r[1], "name": r[2], "description": r[3], "avatar_color": r[4], "avatar_url": r[5], "is_public": r[6], "members_can_write": r[7]}})
+
+    # set_member_role — назначить/снять роль участника
+    if action == "set_member_role":
+        chat_id = body.get("chat_id")
+        target_user_id = body.get("user_id")
+        new_role = body.get("role", "member")
+        if not chat_id or not target_user_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен chat_id и user_id"})
+        if new_role not in ("owner", "admin", "member"):
+            cur.close(); conn.close()
+            return resp(400, {"error": "Роль должна быть owner/admin/member"})
+        cur.execute(f"SELECT role FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
+        row = cur.fetchone()
+        if not row or row[0] not in ("owner", "admin"):
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нет прав"})
+        cur.execute(f"UPDATE {SCHEMA}.vm_chat_members SET role=%s WHERE chat_id=%s AND user_id=%s", (new_role, chat_id, target_user_id))
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
+
+    # kick_member — исключить участника
+    if action == "kick_member":
+        chat_id = body.get("chat_id")
+        target_user_id = body.get("user_id")
+        if not chat_id or not target_user_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен chat_id и user_id"})
+        cur.execute(f"SELECT role FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
+        row = cur.fetchone()
+        if not row or row[0] not in ("owner", "admin"):
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нет прав"})
+        cur.execute(f"SELECT role FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, target_user_id))
+        target = cur.fetchone()
+        if target and target[0] == "owner":
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нельзя исключить владельца"})
+        cur.execute(f"DELETE FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, target_user_id))
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
+
+    # grant_write — выдать право на запись конкретному пользователю в канале
+    if action == "grant_write":
+        chat_id = body.get("chat_id")
+        target_user_id = body.get("user_id")
+        if not chat_id or not target_user_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен chat_id и user_id"})
+        cur.execute(f"SELECT role FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
+        row = cur.fetchone()
+        if not row or row[0] not in ("owner", "admin"):
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нет прав"})
+        cur.execute(f"UPDATE {SCHEMA}.vm_chat_members SET role='admin' WHERE chat_id=%s AND user_id=%s", (chat_id, target_user_id))
         conn.commit()
         cur.close(); conn.close()
         return resp(200, {"ok": True})

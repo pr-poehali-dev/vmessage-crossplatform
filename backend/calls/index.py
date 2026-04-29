@@ -31,7 +31,10 @@ def get_user_by_token(cur, token: str):
     if not token:
         return None
     cur.execute(
-        f"SELECT id, username, display_name, avatar_color, avatar_url FROM {SCHEMA}.vm_users WHERE session_token=%s AND is_active=TRUE",
+        f"""SELECT u.id, u.username, u.display_name, u.avatar_color, u.avatar_url
+            FROM {SCHEMA}.vm_sessions s
+            JOIN {SCHEMA}.vm_users u ON u.id = s.user_id
+            WHERE s.token = %s AND u.is_active = TRUE""",
         (token,),
     )
     return cur.fetchone()
