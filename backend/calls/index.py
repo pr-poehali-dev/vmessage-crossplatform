@@ -110,7 +110,7 @@ def handler(event: dict, context) -> dict:
             JOIN {SCHEMA}.vm_users u ON u.id = c.caller_id
             WHERE c.callee_id = %s
               AND c.status = 'ringing'
-              AND c.created_at > NOW() - INTERVAL '30 seconds'
+              AND c.created_at > NOW() - INTERVAL '60 seconds'
             ORDER BY c.created_at DESC
             LIMIT 1
             """,

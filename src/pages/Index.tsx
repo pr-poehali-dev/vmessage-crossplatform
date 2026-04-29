@@ -885,14 +885,24 @@ const ICE_SERVERS = [
   { urls: "turn:global.relay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
 ];
 
-async function getMedia(isVideo: boolean): Promise<MediaStream> {
+async function getMedia(isVideo: boolean): Promise<{ stream: MediaStream; error?: string }> {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    return { stream: new MediaStream(), error: "Браузер не поддерживает медиа" };
+  }
   try {
-    return await navigator.mediaDevices.getUserMedia(
+    const stream = await navigator.mediaDevices.getUserMedia(
       isVideo ? { video: true, audio: true } : { audio: true }
     );
-  } catch {
-    try { return await navigator.mediaDevices.getUserMedia({ audio: true }); }
-    catch { return new MediaStream(); }
+    return { stream };
+  } catch (e1) {
+    console.warn("[MEDIA] video/audio failed, trying audio only:", e1);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      return { stream, error: isVideo ? "Камера недоступна, только аудио" : undefined };
+    } catch (e2) {
+      console.error("[MEDIA] all getUserMedia failed:", e2);
+      return { stream: new MediaStream(), error: "Нет доступа к микрофону. Разрешите доступ в браузере." };
+    }
   }
 }
 
@@ -920,6 +930,7 @@ function CallModal({ chat, calleeId, type, onClose }: {
   chat: Chat; calleeId: number; type: "audio" | "video"; onClose: () => void;
 }) {
   const [status, setStatus] = useState<"calling" | "connected" | "ended" | "rejected">("calling");
+  const [diagMsg, setDiag] = useState("Запрос доступа к микрофону...");
   const [seconds, setSeconds] = useState(0);
   const [muted, setMuted] = useState(false);
   const [camOff, setCamOff] = useState(false);
@@ -932,115 +943,113 @@ function CallModal({ chat, calleeId, type, onClose }: {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const callIdRef = useRef<number | null>(null);
   const connectedRef = useRef(false);
+  const aliveRef = useRef(true);
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
   const stopAll = useCallback((endOnServer = false) => {
+    aliveRef.current = false;
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     streamRef.current?.getTracks().forEach(t => t.stop());
-    pcRef.current?.close();
+    try { pcRef.current?.close(); } catch (_e) { void _e; }
     if (endOnServer && callIdRef.current) callsApi.end(callIdRef.current);
   }, []);
 
   useEffect(() => {
-    let alive = true;
-
+    aliveRef.current = true;
     const run = async () => {
-      const stream = await getMedia(type === "video");
-      if (!alive) { stream.getTracks().forEach(t => t.stop()); return; }
+      setDiag("Запрос доступа к микрофону...");
+      const { stream, error: mediaErr } = await getMedia(type === "video");
+      if (!aliveRef.current) { stream.getTracks().forEach(t => t.stop()); return; }
+      if (mediaErr) { setDiag(mediaErr); }
       streamRef.current = stream;
-      if (localVideoRef.current && type === "video") {
+      if (localVideoRef.current && type === "video" && stream.getVideoTracks().length > 0) {
         localVideoRef.current.srcObject = stream;
         localVideoRef.current.play().catch(() => {});
       }
 
+      setDiag("Начало звонка...");
       const initRes = await callsApi.initiate(calleeId, type);
-      if (!initRes.ok || !alive) { stopAll(); onClose(); return; }
+      console.log("[CALL] initiate:", initRes);
+      if (!initRes.ok || !aliveRef.current) {
+        setDiag("Не удалось начать звонок: " + (initRes.error || "ошибка сети"));
+        setTimeout(onClose, 2000);
+        return;
+      }
       callIdRef.current = initRes.call_id;
-      console.log("[CALL] initiated", callIdRef.current);
 
       const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
       pcRef.current = pc;
       stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
-      // Handle remote tracks
       const remoteStream = new MediaStream();
       pc.ontrack = e => {
-        console.log("[CALL] got remote track", e.track.kind);
-        remoteStream.addTrack(e.track);
+        console.log("[CALL] remote track:", e.track.kind);
+        (e.streams[0] ? e.streams[0].getTracks() : [e.track]).forEach(t => remoteStream.addTrack(t));
+        const src = e.streams[0] || remoteStream;
         if (type === "video" && remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = remoteStream;
-          remoteVideoRef.current.play().catch(() => {});
+          remoteVideoRef.current.srcObject = src; remoteVideoRef.current.play().catch(() => {});
         } else if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = remoteStream;
-          remoteAudioRef.current.play().catch(() => {});
+          remoteAudioRef.current.srcObject = src; remoteAudioRef.current.play().catch(() => {});
         }
       };
 
+      const onConnected = () => {
+        if (connectedRef.current) return;
+        connectedRef.current = true;
+        setStatus("connected"); setDiag("");
+        if (!timerRef.current) timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
+      };
+      pc.oniceconnectionstatechange = () => {
+        console.log("[CALL] iceState:", pc.iceConnectionState);
+        if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") onConnected();
+        if (pc.iceConnectionState === "failed") { setDiag("ICE failed — нет пути для соединения"); }
+      };
       pc.onconnectionstatechange = () => {
-        console.log("[CALL] connection state:", pc.connectionState);
-        if (pc.connectionState === "connected" && !connectedRef.current) {
-          connectedRef.current = true;
-          setStatus("connected");
-          if (!timerRef.current) timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
-        }
-        if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
-          if (alive) { setStatus("ended"); stopAll(true); setTimeout(onClose, 1000); }
+        console.log("[CALL] connState:", pc.connectionState);
+        if (pc.connectionState === "connected" || pc.connectionState === "completed") onConnected();
+        if (pc.connectionState === "failed" && aliveRef.current) {
+          setStatus("ended"); setDiag("Соединение не удалось"); stopAll(true); setTimeout(onClose, 2000);
         }
       };
 
-      // Create offer, wait for ICE gathering, then send full SDP with candidates
+      setDiag("Создание оффера...");
       const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: type === "video" });
       await pc.setLocalDescription(offer);
-      console.log("[CALL] waiting for ICE gathering...");
+      setDiag("Сбор ICE...");
       await waitForIceGathering(pc);
-      console.log("[CALL] ICE gathering complete, sending offer with candidates");
-      await callsApi.sendOffer(callIdRef.current, JSON.stringify(pc.localDescription));
-      console.log("[CALL] offer sent (full SDP with ICE)");
+      console.log("[CALL] SDP length:", pc.localDescription?.sdp?.length);
+      await callsApi.sendOffer(callIdRef.current!, JSON.stringify(pc.localDescription));
+      setDiag("Ожидание ответа...");
+      console.log("[CALL] offer sent");
 
-      // Poll for answer — no need for separate ICE exchange
       pollRef.current = setInterval(async () => {
-        if (!callIdRef.current || !alive) return;
+        if (!callIdRef.current || !aliveRef.current) return;
         const st = await callsApi.getStatus(callIdRef.current);
+        console.log("[CALL] poll:", st.status, "has_answer:", st.has_answer);
         if (!st.ok) return;
-        console.log("[CALL] poll status:", st.status, "has_answer:", st.has_answer);
-
-        if (st.status === "rejected" || st.status === "ended") {
-          if (alive) {
-            setStatus(st.status === "rejected" ? "rejected" : "ended");
-            stopAll();
-            setTimeout(onClose, 1200);
-          }
-          return;
-        }
-
+        if (st.status === "rejected") { if (aliveRef.current) { setStatus("rejected"); stopAll(); setTimeout(onClose, 1500); } return; }
+        if (st.status === "ended") { if (aliveRef.current) { setStatus("ended"); stopAll(); setTimeout(onClose, 1000); } return; }
         if (st.status === "accepted" && st.has_answer && !pc.remoteDescription) {
-          const ansR = await callsApi.getAnswer(callIdRef.current);
+          const ansR = await callsApi.getAnswer(callIdRef.current!);
+          console.log("[CALL] answer ok:", ansR.ok, "len:", ansR.answer?.length);
           if (ansR.ok && ansR.answer) {
             try {
               await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(ansR.answer)));
-              console.log("[CALL] remote description set (full SDP with ICE)");
-              if (!connectedRef.current) {
-                setStatus("connected");
-                connectedRef.current = true;
-                if (!timerRef.current) timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
-              }
-            } catch (e) { console.error("[CALL] setRemoteDescription failed", e); }
+              setDiag("Соединяем...");
+              console.log("[CALL] remote desc set");
+            } catch (e) { console.error("[CALL] setRemoteDesc failed:", e); }
           }
         }
-      }, 2000);
+      }, 1500);
     };
 
-    run();
-    return () => { alive = false; stopAll(true); };
+    run().catch(e => { console.error("[CALL] error:", e); setDiag("Ошибка: " + String(e?.message || e)); });
+    return () => { stopAll(true); };
   }, [calleeId, type, stopAll, onClose]);
 
-  const endCall = async () => {
-    stopAll(true);
-    setStatus("ended");
-    setTimeout(onClose, 800);
-  };
+  const endCall = () => { stopAll(true); setStatus("ended"); setTimeout(onClose, 600); };
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col items-center justify-between bg-gradient-to-b from-violet-900 to-indigo-900 p-8 animate-fade-in">
@@ -1054,12 +1063,13 @@ function CallModal({ chat, calleeId, type, onClose }: {
         </div>
       )}
       {type === "audio" && <audio ref={remoteAudioRef} autoPlay />}
-      <div className="relative flex flex-col items-center mt-12 z-10">
+      <div className="relative flex flex-col items-center mt-12 z-10 text-center px-4">
         <Avatar label={chat.name} color={chat.avatar_color} size={100} src={chat.avatar_url || undefined} />
         <h2 className="text-white font-bold text-2xl mt-4">{chat.name}</h2>
         <p className="text-white/70 text-sm mt-1">
-          {status === "calling" ? "Вызов..." : status === "connected" ? fmt(seconds) : status === "rejected" ? "Недоступен" : "Звонок завершён"}
+          {status === "connected" ? fmt(seconds) : status === "rejected" ? "Недоступен" : status === "ended" ? "Звонок завершён" : "Вызов..."}
         </p>
+        {diagMsg && <p className="text-white/40 text-xs mt-2">{diagMsg}</p>}
         {status === "calling" && (
           <div className="flex gap-1 mt-3">
             {[0,1,2].map(i => <div key={i} className="w-2 h-2 bg-white/60 rounded-full animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />)}
@@ -1069,15 +1079,15 @@ function CallModal({ chat, calleeId, type, onClose }: {
       <div className="relative flex items-center gap-6 z-10 mb-8">
         {type === "video" && (
           <button onClick={() => { streamRef.current?.getVideoTracks().forEach(t => { t.enabled = !t.enabled; }); setCamOff(v => !v); }}
-            className={`w-14 h-14 rounded-full ${camOff ? "bg-red-500" : "bg-white/20"} text-white flex items-center justify-center hover:opacity-90 transition-colors`}>
+            className={`w-14 h-14 rounded-full ${camOff ? "bg-red-500" : "bg-white/20"} text-white flex items-center justify-center`}>
             <Icon name={camOff ? "VideoOff" : "Video"} size={22} />
           </button>
         )}
         <button onClick={() => { streamRef.current?.getAudioTracks().forEach(t => { t.enabled = !t.enabled; }); setMuted(v => !v); }}
-          className={`w-14 h-14 rounded-full ${muted ? "bg-red-500" : "bg-white/20"} text-white flex items-center justify-center hover:opacity-90 transition-colors`}>
+          className={`w-14 h-14 rounded-full ${muted ? "bg-red-500" : "bg-white/20"} text-white flex items-center justify-center`}>
           <Icon name={muted ? "MicOff" : "Mic"} size={22} />
         </button>
-        <button onClick={endCall} className="w-16 h-16 rounded-full bg-red-500 text-white flex items-center justify-center shadow-2xl shadow-red-500/50 hover:bg-red-600 transition-colors">
+        <button onClick={endCall} className="w-16 h-16 rounded-full bg-red-500 text-white flex items-center justify-center shadow-2xl shadow-red-500/50">
           <Icon name="PhoneOff" size={26} />
         </button>
       </div>
@@ -1127,6 +1137,7 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
   callType: string; onClose: () => void;
 }) {
   const [seconds, setSeconds] = useState(0);
+  const [diagMsg, setDiag] = useState("Получение оффера...");
   const [muted, setMuted] = useState(false);
   const [camOff, setCamOff] = useState(false);
   const localVideoRef = useRef<HTMLVideoElement>(null);
@@ -1137,89 +1148,113 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
   const streamRef = useRef<MediaStream | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const connectedRef = useRef(false);
+  const aliveRef = useRef(true);
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
   const stopAll = useCallback((endOnServer = false) => {
+    aliveRef.current = false;
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     streamRef.current?.getTracks().forEach(t => t.stop());
-    pcRef.current?.close();
+    try { pcRef.current?.close(); } catch (_e) { void _e; }
     if (endOnServer) callsApi.end(callId);
   }, [callId]);
 
   useEffect(() => {
-    let alive = true;
-
+    aliveRef.current = true;
     const run = async () => {
-      const stream = await getMedia(callType === "video");
-      if (!alive) { stream.getTracks().forEach(t => t.stop()); return; }
+      setDiag("Запрос доступа к микрофону...");
+      const { stream, error: mediaErr } = await getMedia(callType === "video");
+      if (!aliveRef.current) { stream.getTracks().forEach(t => t.stop()); return; }
+      if (mediaErr) setDiag(mediaErr);
       streamRef.current = stream;
-      if (localVideoRef.current && callType === "video") {
-        localVideoRef.current.srcObject = stream;
-        localVideoRef.current.play().catch(() => {});
+      if (localVideoRef.current && callType === "video" && stream.getVideoTracks().length > 0) {
+        localVideoRef.current.srcObject = stream; localVideoRef.current.play().catch(() => {});
       }
 
-      const offerRes = await callsApi.getOffer(callId);
-      if (!offerRes.ok || !offerRes.offer || !alive) { stopAll(); onClose(); return; }
-      console.log("[CALLEE] got offer (full SDP with ICE)");
+      setDiag("Получение оффера...");
+      let offerRes = await callsApi.getOffer(callId);
+      console.log("[CALLEE] getOffer:", offerRes.ok, "has offer:", !!offerRes.offer);
+
+      // Retry up to 5 times if offer not yet ready
+      let retries = 0;
+      while ((!offerRes.ok || !offerRes.offer) && retries < 5 && aliveRef.current) {
+        await new Promise(r => setTimeout(r, 1000));
+        offerRes = await callsApi.getOffer(callId);
+        retries++;
+        console.log("[CALLEE] retry getOffer:", retries, offerRes.ok, !!offerRes.offer);
+      }
+      if (!offerRes.ok || !offerRes.offer || !aliveRef.current) {
+        setDiag("Не удалось получить оффер");
+        stopAll(); setTimeout(onClose, 2000); return;
+      }
 
       const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
       pcRef.current = pc;
       stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
-      // Handle remote tracks
       const remoteStream = new MediaStream();
       pc.ontrack = e => {
-        console.log("[CALLEE] got remote track", e.track.kind);
-        remoteStream.addTrack(e.track);
+        console.log("[CALLEE] remote track:", e.track.kind);
+        (e.streams[0] ? e.streams[0].getTracks() : [e.track]).forEach(t => remoteStream.addTrack(t));
+        const src = e.streams[0] || remoteStream;
         if (callType === "video" && remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = remoteStream;
-          remoteVideoRef.current.play().catch(() => {});
+          remoteVideoRef.current.srcObject = src; remoteVideoRef.current.play().catch(() => {});
         } else if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = remoteStream;
-          remoteAudioRef.current.play().catch(() => {});
+          remoteAudioRef.current.srcObject = src; remoteAudioRef.current.play().catch(() => {});
         }
       };
 
+      const onConnected = () => {
+        if (connectedRef.current) return;
+        connectedRef.current = true;
+        setDiag("");
+        if (!timerRef.current) timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
+      };
+      pc.oniceconnectionstatechange = () => {
+        console.log("[CALLEE] iceState:", pc.iceConnectionState);
+        if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") onConnected();
+        if (pc.iceConnectionState === "failed") setDiag("ICE failed");
+      };
       pc.onconnectionstatechange = () => {
-        console.log("[CALLEE] connection state:", pc.connectionState);
-        if (pc.connectionState === "connected" && !connectedRef.current) {
-          connectedRef.current = true;
-        }
-        if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
-          if (alive) { stopAll(true); onClose(); }
+        console.log("[CALLEE] connState:", pc.connectionState);
+        if (pc.connectionState === "connected" || pc.connectionState === "completed") onConnected();
+        if (pc.connectionState === "failed" && aliveRef.current) {
+          setDiag("Соединение не удалось"); stopAll(true); setTimeout(onClose, 2000);
         }
       };
 
-      // Set remote description (offer with all ICE candidates from caller)
-      await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(offerRes.offer)));
-      console.log("[CALLEE] remote description set");
+      setDiag("Установка remote description...");
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(offerRes.offer)));
+        console.log("[CALLEE] remote desc set");
+      } catch (e) {
+        console.error("[CALLEE] setRemoteDesc failed:", e);
+        setDiag("Ошибка оффера"); stopAll(); setTimeout(onClose, 2000); return;
+      }
 
-      // Create answer, wait for ICE gathering, then send full SDP
+      setDiag("Создание ответа...");
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      console.log("[CALLEE] waiting for ICE gathering...");
+      setDiag("Сбор ICE...");
       await waitForIceGathering(pc);
-      console.log("[CALLEE] ICE gathering complete, sending answer with candidates");
+      console.log("[CALLEE] answer SDP length:", pc.localDescription?.sdp?.length);
       await callsApi.accept(callId, JSON.stringify(pc.localDescription));
-      console.log("[CALLEE] answer sent via accept (full SDP with ICE)");
+      setDiag("Соединяем...");
+      console.log("[CALLEE] answer sent");
 
-      timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
-
-      // Poll only for status (end/reject) — no ICE exchange needed
       pollRef.current = setInterval(async () => {
-        if (!alive) return;
+        if (!aliveRef.current) return;
         const st = await callsApi.getStatus(callId);
         if (st.status === "ended" || st.status === "rejected") {
-          if (alive) { stopAll(); onClose(); }
-          return;
+          if (aliveRef.current) { stopAll(); onClose(); }
         }
       }, 2000);
     };
 
-    run();
-    return () => { alive = false; stopAll(true); };
+    run().catch(e => { console.error("[CALLEE] error:", e); setDiag("Ошибка: " + String(e?.message || e)); });
+    return () => { stopAll(true); };
   }, [callId, callType, stopAll, onClose]);
 
   const endCall = () => { stopAll(true); onClose(); };
@@ -1235,10 +1270,11 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
         </div>
       )}
       {callType === "audio" && <audio ref={remoteAudioRef} autoPlay />}
-      <div className="relative flex flex-col items-center mt-12 z-10">
+      <div className="relative flex flex-col items-center mt-12 z-10 text-center px-4">
         <Avatar label={callerName} color={callerColor} size={100} src={callerAvatar} />
         <h2 className="text-white font-bold text-2xl mt-4">{callerName}</h2>
-        <p className="text-white/70 text-sm mt-1">{fmt(seconds)}</p>
+        <p className="text-white/70 text-sm mt-1">{connectedRef.current ? fmt(seconds) : "Соединение..."}</p>
+        {diagMsg && <p className="text-white/40 text-xs mt-2">{diagMsg}</p>}
       </div>
       <div className="relative flex items-center gap-6 z-10 mb-8">
         <button onClick={() => { streamRef.current?.getAudioTracks().forEach(t => { t.enabled = !t.enabled; }); setMuted(v => !v); }}
@@ -1251,7 +1287,7 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
             <Icon name={camOff ? "VideoOff" : "Video"} size={22} />
           </button>
         )}
-        <button onClick={endCall} className="w-16 h-16 rounded-full bg-red-500 text-white flex items-center justify-center shadow-2xl shadow-red-500/50 hover:bg-red-600 transition-colors">
+        <button onClick={endCall} className="w-16 h-16 rounded-full bg-red-500 text-white flex items-center justify-center shadow-2xl shadow-red-500/50">
           <Icon name="PhoneOff" size={26} />
         </button>
       </div>
@@ -2976,34 +3012,39 @@ export default function Index() {
 
   // Polling входящих звонков
   const seenCallIds = useRef<Set<number>>(new Set());
+  const incomingCallRef = useRef(incomingCall);
+  const activeCallRef = useRef(activeCall);
+  useEffect(() => { incomingCallRef.current = incomingCall; }, [incomingCall]);
+  useEffect(() => { activeCallRef.current = activeCall; }, [activeCall]);
   useEffect(() => {
     if (!me) return;
     const poll = setInterval(async () => {
-      if (incomingCall || activeCall) return;
+      if (incomingCallRef.current || activeCallRef.current) return;
       const res = await callsApi.getIncoming();
       if (res.ok && res.call) {
         const callId = res.call.id;
         if (seenCallIds.current.has(callId)) return;
         seenCallIds.current.add(callId);
         setIncomingCall(res.call);
-        // Звуковой сигнал входящего
         try {
           const ctx = new AudioContext();
-          const ring = () => {
-            const osc = ctx.createOscillator();
-            const g = ctx.createGain();
-            osc.connect(g); g.connect(ctx.destination);
-            osc.frequency.value = 440; osc.type = "sine";
-            g.gain.setValueAtTime(0.2, ctx.currentTime);
-            g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
-            osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.5);
-          };
-          ring(); setTimeout(ring, 700);
+          ctx.resume().then(() => {
+            const ring = () => {
+              const osc = ctx.createOscillator();
+              const g = ctx.createGain();
+              osc.connect(g); g.connect(ctx.destination);
+              osc.frequency.value = 440; osc.type = "sine";
+              g.gain.setValueAtTime(0.3, ctx.currentTime);
+              g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
+              osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.6);
+            };
+            ring(); setTimeout(ring, 800); setTimeout(ring, 1600);
+          }).catch(() => {});
         } catch (_e) { void _e; }
       }
-    }, 3000);
+    }, 2000);
     return () => clearInterval(poll);
-  }, [me, incomingCall, activeCall]);
+  }, [me]);
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
