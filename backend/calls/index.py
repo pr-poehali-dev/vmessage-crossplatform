@@ -134,6 +134,24 @@ def handler(event: dict, context) -> dict:
             },
         })
 
+    # ── 2b. mark_accepted — меняет статус сразу при нажатии "принять" ────────
+    if action == "mark_accepted" and method == "POST":
+        call_id = body.get("call_id")
+        if not call_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "call_id обязателен"})
+        cur.execute(
+            f"""
+            UPDATE {SCHEMA}.vm_calls
+            SET status = 'accepted', updated_at = NOW()
+            WHERE id = %s AND callee_id = %s AND status = 'ringing'
+            """,
+            (call_id, user_id),
+        )
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
+
     # ── 3. accept ─────────────────────────────────────────────────────────────
     if action == "accept" and method == "POST":
         call_id = body.get("call_id")
@@ -147,7 +165,7 @@ def handler(event: dict, context) -> dict:
             f"""
             UPDATE {SCHEMA}.vm_calls
             SET status = 'accepted', answer = %s, updated_at = NOW()
-            WHERE id = %s AND callee_id = %s AND status = 'ringing'
+            WHERE id = %s AND callee_id = %s AND status IN ('ringing', 'accepted')
             """,
             (answer, call_id, user_id),
         )

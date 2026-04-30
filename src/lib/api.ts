@@ -251,4 +251,7 @@ export const callsApi = {
     call(CALLS_URL, "get_status", "GET", undefined, undefined, { call_id: String(call_id) }),
 
   getIceConfig: () => call(CALLS_URL, "get_ice_config", "GET"),
+
+  markAccepted: (call_id: number) =>
+    call(CALLS_URL, "mark_accepted", "POST", { call_id }),
 };

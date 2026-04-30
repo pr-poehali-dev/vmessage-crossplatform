@@ -1202,17 +1202,19 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
       let offerRes = firstOffer;
       log(`Оффер: ok=${offerRes.ok} has=${!!offerRes.offer}`);
 
-      let retries = 0;
-      while ((!offerRes.ok || !offerRes.offer) && retries < 8 && aliveRef.current) {
-        await new Promise(r => setTimeout(r, 1000));
+      // Ждём оффер до 40 секунд (caller собирает ICE — это занимает время)
+      let waited = 0;
+      while ((!offerRes.ok || !offerRes.offer) && waited < 40 && aliveRef.current) {
+        await new Promise(r => setTimeout(r, 1500));
         offerRes = await callsApi.getOffer(callId);
-        retries++;
-        log(`Retry ${retries}: ok=${offerRes.ok} has=${!!offerRes.offer}`);
+        waited += 1.5;
+        if (!offerRes.offer) log(`Жду оффер... ${Math.round(waited)}с`);
       }
       if (!offerRes.ok || !offerRes.offer || !aliveRef.current) {
-        log("❌ Оффер не получен");
+        log("❌ Оффер не получен за 40с");
         stopAll(); setTimeout(onClose, 3000); return;
       }
+      log("Оффер получен!");
 
       const pc = new RTCPeerConnection({ iceServers });
       pcRef.current = pc;
@@ -3154,7 +3156,8 @@ export default function Index() {
             await callsApi.reject(incomingCall.id);
             setIncomingCall(null);
           }}
-          onAccept={() => {
+          onAccept={async () => {
+            callsApi.markAccepted(incomingCall.id);
             setActiveCall(incomingCall);
             setIncomingCall(null);
           }}
