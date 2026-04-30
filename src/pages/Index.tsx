@@ -944,7 +944,7 @@ function CallModal({ chat, calleeId, type, onClose }: {
   chat: Chat; calleeId: number; type: "audio" | "video"; onClose: () => void;
 }) {
   const [status, setStatus] = useState<"calling" | "connected" | "ended" | "rejected">("calling");
-  const [diagMsg, setDiag] = useState("Запрос доступа к микрофону...");
+  const [logs, setLogs] = useState<string[]>([]);
   const [seconds, setSeconds] = useState(0);
   const [muted, setMuted] = useState(false);
   const [camOff, setCamOff] = useState(false);
@@ -960,6 +960,7 @@ function CallModal({ chat, calleeId, type, onClose }: {
   const aliveRef = useRef(true);
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const log = (msg: string) => { console.log("[CALL]", msg); setLogs(l => [...l.slice(-6), msg]); };
 
   const stopAll = useCallback((endOnServer = false) => {
     aliveRef.current = false;
@@ -973,28 +974,29 @@ function CallModal({ chat, calleeId, type, onClose }: {
   useEffect(() => {
     aliveRef.current = true;
     const run = async () => {
-      setDiag("Запрос доступа к микрофону...");
+      log("Запрос микрофона...");
       const { stream, error: mediaErr } = await getMedia(type === "video");
       if (!aliveRef.current) { stream.getTracks().forEach(t => t.stop()); return; }
-      if (mediaErr) { setDiag(mediaErr); }
+      if (mediaErr) log("⚠️ " + mediaErr);
+      else log(`Микрофон OK (треков: ${stream.getTracks().length})`);
       streamRef.current = stream;
       if (localVideoRef.current && type === "video" && stream.getVideoTracks().length > 0) {
         localVideoRef.current.srcObject = stream;
         localVideoRef.current.play().catch(() => {});
       }
 
-      setDiag("Начало звонка...");
+      log("Initiate + ICE config...");
       const [initRes, iceServers] = await Promise.all([
         callsApi.initiate(calleeId, type),
         getIceServers(),
       ]);
-      console.log("[CALL] initiate:", initRes, "ICE servers:", iceServers.length);
       if (!initRes.ok || !aliveRef.current) {
-        setDiag("Не удалось начать звонок: " + (initRes.error || "ошибка сети"));
-        setTimeout(onClose, 2000);
+        log("❌ Initiate failed: " + (initRes.error || "net error"));
+        setTimeout(onClose, 3000);
         return;
       }
       callIdRef.current = initRes.call_id;
+      log(`Call ID: ${initRes.call_id}, ICE: ${iceServers.length} серверов`);
 
       const pc = new RTCPeerConnection({ iceServers });
       pcRef.current = pc;
@@ -1002,7 +1004,7 @@ function CallModal({ chat, calleeId, type, onClose }: {
 
       const remoteStream = new MediaStream();
       pc.ontrack = e => {
-        console.log("[CALL] remote track:", e.track.kind);
+        log(`Remote track: ${e.track.kind}`);
         (e.streams[0] ? e.streams[0].getTracks() : [e.track]).forEach(t => remoteStream.addTrack(t));
         const src = e.streams[0] || remoteStream;
         if (type === "video" && remoteVideoRef.current) {
@@ -1015,61 +1017,59 @@ function CallModal({ chat, calleeId, type, onClose }: {
       const onConnected = () => {
         if (connectedRef.current) return;
         connectedRef.current = true;
-        setStatus("connected"); setDiag("");
+        setStatus("connected");
+        setLogs([]);
         if (!timerRef.current) timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
       };
       pc.oniceconnectionstatechange = () => {
-        console.log("[CALL] iceState:", pc.iceConnectionState);
+        log(`ICE: ${pc.iceConnectionState}`);
         if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") onConnected();
-        if (pc.iceConnectionState === "failed") { setDiag("ICE failed — нет пути для соединения"); }
       };
       pc.onconnectionstatechange = () => {
-        console.log("[CALL] connState:", pc.connectionState);
+        log(`Conn: ${pc.connectionState}`);
         if (pc.connectionState === "connected" || pc.connectionState === "completed") onConnected();
         if (pc.connectionState === "failed" && aliveRef.current) {
-          setStatus("ended"); setDiag("Соединение не удалось"); stopAll(true); setTimeout(onClose, 2000);
+          setStatus("ended"); stopAll(true); setTimeout(onClose, 4000);
         }
       };
+      pc.onicegatheringstatechange = () => log(`Gather: ${pc.iceGatheringState}`);
 
-      setDiag("Создание оффера...");
+      log("Создаю offer...");
       const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: type === "video" });
       await pc.setLocalDescription(offer);
-      setDiag("Сбор ICE...");
+      log("Жду ICE gathering...");
       await waitForIceGathering(pc);
-      console.log("[CALL] SDP length:", pc.localDescription?.sdp?.length);
+      log(`SDP готов (${pc.localDescription?.sdp?.length} байт), отправляю...`);
       await callsApi.sendOffer(callIdRef.current!, JSON.stringify(pc.localDescription));
-      setDiag("Ожидание ответа...");
-      console.log("[CALL] offer sent");
+      log("Offer отправлен. Жду ответ...");
 
       pollRef.current = setInterval(async () => {
         if (!callIdRef.current || !aliveRef.current) return;
         const st = await callsApi.getStatus(callIdRef.current);
-        console.log("[CALL] poll:", st.status, "has_answer:", st.has_answer);
         if (!st.ok) return;
         if (st.status === "rejected") { if (aliveRef.current) { setStatus("rejected"); stopAll(); setTimeout(onClose, 1500); } return; }
         if (st.status === "ended") { if (aliveRef.current) { setStatus("ended"); stopAll(); setTimeout(onClose, 1000); } return; }
         if (st.status === "accepted" && st.has_answer && !pc.remoteDescription) {
+          log(`Статус: accepted, получаю answer...`);
           const ansR = await callsApi.getAnswer(callIdRef.current!);
-          console.log("[CALL] answer ok:", ansR.ok, "len:", ansR.answer?.length);
           if (ansR.ok && ansR.answer) {
             try {
               await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(ansR.answer)));
-              setDiag("Соединяем...");
-              console.log("[CALL] remote desc set");
-            } catch (e) { console.error("[CALL] setRemoteDesc failed:", e); }
-          }
+              log("Remote desc установлен. ICE идёт...");
+            } catch (e) { log("❌ setRemoteDesc: " + String((e as Error)?.message || e)); }
+          } else { log("❌ getAnswer failed: " + JSON.stringify(ansR)); }
         }
       }, 1500);
     };
 
-    run().catch(e => { console.error("[CALL] error:", e); setDiag("Ошибка: " + String(e?.message || e)); });
+    run().catch(e => { log("❌ Exception: " + String((e as Error)?.message || e)); });
     return () => { stopAll(true); };
   }, [calleeId, type, stopAll, onClose]);
 
   const endCall = () => { stopAll(true); setStatus("ended"); setTimeout(onClose, 600); };
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col items-center justify-between bg-gradient-to-b from-violet-900 to-indigo-900 p-8 animate-fade-in">
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-between bg-gradient-to-b from-violet-900 to-indigo-900 p-4 animate-fade-in">
       {type === "video" && (
         <div className="absolute inset-0">
           <video ref={remoteVideoRef} className="w-full h-full object-cover" playsInline autoPlay />
@@ -1080,20 +1080,21 @@ function CallModal({ chat, calleeId, type, onClose }: {
         </div>
       )}
       {type === "audio" && <audio ref={remoteAudioRef} autoPlay />}
-      <div className="relative flex flex-col items-center mt-12 z-10 text-center px-4">
-        <Avatar label={chat.name} color={chat.avatar_color} size={100} src={chat.avatar_url || undefined} />
-        <h2 className="text-white font-bold text-2xl mt-4">{chat.name}</h2>
+      <div className="relative flex flex-col items-center mt-8 z-10 text-center px-4 w-full">
+        <Avatar label={chat.name} color={chat.avatar_color} size={80} src={chat.avatar_url || undefined} />
+        <h2 className="text-white font-bold text-xl mt-3">{chat.name}</h2>
         <p className="text-white/70 text-sm mt-1">
-          {status === "connected" ? fmt(seconds) : status === "rejected" ? "Недоступен" : status === "ended" ? "Звонок завершён" : "Вызов..."}
+          {status === "connected" ? fmt(seconds) : status === "rejected" ? "Недоступен" : status === "ended" ? "Завершён" : "Вызов..."}
         </p>
-        {diagMsg && <p className="text-white/40 text-xs mt-2">{diagMsg}</p>}
-        {status === "calling" && (
-          <div className="flex gap-1 mt-3">
-            {[0,1,2].map(i => <div key={i} className="w-2 h-2 bg-white/60 rounded-full animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />)}
+        {status !== "connected" && logs.length > 0 && (
+          <div className="mt-3 w-full max-w-xs bg-black/40 rounded-xl p-2 text-left">
+            {logs.map((l, i) => (
+              <p key={i} className={`text-xs font-mono leading-5 ${l.startsWith("❌") ? "text-red-400" : l.startsWith("⚠️") ? "text-yellow-400" : "text-white/60"}`}>{l}</p>
+            ))}
           </div>
         )}
       </div>
-      <div className="relative flex items-center gap-6 z-10 mb-8">
+      <div className="relative flex items-center gap-6 z-10 mb-6">
         {type === "video" && (
           <button onClick={() => { streamRef.current?.getVideoTracks().forEach(t => { t.enabled = !t.enabled; }); setCamOff(v => !v); }}
             className={`w-14 h-14 rounded-full ${camOff ? "bg-red-500" : "bg-white/20"} text-white flex items-center justify-center`}>
@@ -1154,7 +1155,8 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
   callType: string; onClose: () => void;
 }) {
   const [seconds, setSeconds] = useState(0);
-  const [diagMsg, setDiag] = useState("Получение оффера...");
+  const [connected, setConnected] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
   const [muted, setMuted] = useState(false);
   const [camOff, setCamOff] = useState(false);
   const localVideoRef = useRef<HTMLVideoElement>(null);
@@ -1168,6 +1170,7 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
   const aliveRef = useRef(true);
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const log = (msg: string) => { console.log("[CALLEE]", msg); setLogs(l => [...l.slice(-6), msg]); };
 
   const stopAll = useCallback((endOnServer = false) => {
     aliveRef.current = false;
@@ -1181,44 +1184,43 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
   useEffect(() => {
     aliveRef.current = true;
     const run = async () => {
-      setDiag("Запрос доступа к микрофону...");
+      log("Запрос микрофона...");
       const [{ stream, error: mediaErr }, iceServers, firstOffer] = await Promise.all([
         getMedia(callType === "video"),
         getIceServers(),
         callsApi.getOffer(callId),
       ]);
       if (!aliveRef.current) { stream.getTracks().forEach(t => t.stop()); return; }
-      if (mediaErr) setDiag(mediaErr);
+      if (mediaErr) log("⚠️ " + mediaErr);
+      else log(`Микрофон OK (треков: ${stream.getTracks().length})`);
       streamRef.current = stream;
       if (localVideoRef.current && callType === "video" && stream.getVideoTracks().length > 0) {
         localVideoRef.current.srcObject = stream; localVideoRef.current.play().catch(() => {});
       }
 
-      setDiag("Получение оффера...");
+      log(`ICE: ${iceServers.length} серверов`);
       let offerRes = firstOffer;
-      console.log("[CALLEE] getOffer:", offerRes.ok, "has offer:", !!offerRes.offer);
+      log(`Оффер: ok=${offerRes.ok} has=${!!offerRes.offer}`);
 
-      // Retry up to 5 times if offer not yet ready
       let retries = 0;
-      while ((!offerRes.ok || !offerRes.offer) && retries < 5 && aliveRef.current) {
+      while ((!offerRes.ok || !offerRes.offer) && retries < 8 && aliveRef.current) {
         await new Promise(r => setTimeout(r, 1000));
         offerRes = await callsApi.getOffer(callId);
         retries++;
-        console.log("[CALLEE] retry getOffer:", retries, offerRes.ok, !!offerRes.offer);
+        log(`Retry ${retries}: ok=${offerRes.ok} has=${!!offerRes.offer}`);
       }
       if (!offerRes.ok || !offerRes.offer || !aliveRef.current) {
-        setDiag("Не удалось получить оффер");
-        stopAll(); setTimeout(onClose, 2000); return;
+        log("❌ Оффер не получен");
+        stopAll(); setTimeout(onClose, 3000); return;
       }
 
       const pc = new RTCPeerConnection({ iceServers });
-      console.log("[CALLEE] PeerConnection created with", iceServers.length, "ICE servers");
       pcRef.current = pc;
       stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
       const remoteStream = new MediaStream();
       pc.ontrack = e => {
-        console.log("[CALLEE] remote track:", e.track.kind);
+        log(`Remote track: ${e.track.kind}`);
         (e.streams[0] ? e.streams[0].getTracks() : [e.track]).forEach(t => remoteStream.addTrack(t));
         const src = e.streams[0] || remoteStream;
         if (callType === "video" && remoteVideoRef.current) {
@@ -1231,40 +1233,40 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
       const onConnected = () => {
         if (connectedRef.current) return;
         connectedRef.current = true;
-        setDiag("");
+        setConnected(true);
+        setLogs([]);
         if (!timerRef.current) timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
       };
       pc.oniceconnectionstatechange = () => {
-        console.log("[CALLEE] iceState:", pc.iceConnectionState);
+        log(`ICE: ${pc.iceConnectionState}`);
         if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") onConnected();
-        if (pc.iceConnectionState === "failed") setDiag("ICE failed");
       };
       pc.onconnectionstatechange = () => {
-        console.log("[CALLEE] connState:", pc.connectionState);
+        log(`Conn: ${pc.connectionState}`);
         if (pc.connectionState === "connected" || pc.connectionState === "completed") onConnected();
         if (pc.connectionState === "failed" && aliveRef.current) {
-          setDiag("Соединение не удалось"); stopAll(true); setTimeout(onClose, 2000);
+          stopAll(true); setTimeout(onClose, 4000);
         }
       };
+      pc.onicegatheringstatechange = () => log(`Gather: ${pc.iceGatheringState}`);
 
-      setDiag("Установка remote description...");
+      log("setRemoteDescription...");
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(offerRes.offer)));
-        console.log("[CALLEE] remote desc set");
+        log("Remote desc OK");
       } catch (e) {
-        console.error("[CALLEE] setRemoteDesc failed:", e);
-        setDiag("Ошибка оффера"); stopAll(); setTimeout(onClose, 2000); return;
+        log("❌ RemoteDesc: " + String((e as Error)?.message || e));
+        stopAll(); setTimeout(onClose, 3000); return;
       }
 
-      setDiag("Создание ответа...");
+      log("createAnswer...");
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      setDiag("Сбор ICE...");
+      log("Жду ICE gathering...");
       await waitForIceGathering(pc);
-      console.log("[CALLEE] answer SDP length:", pc.localDescription?.sdp?.length);
+      log(`Answer SDP (${pc.localDescription?.sdp?.length} байт), отправляю...`);
       await callsApi.accept(callId, JSON.stringify(pc.localDescription));
-      setDiag("Соединяем...");
-      console.log("[CALLEE] answer sent");
+      log("Answer отправлен. ICE идёт...");
 
       pollRef.current = setInterval(async () => {
         if (!aliveRef.current) return;
@@ -1275,14 +1277,14 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
       }, 2000);
     };
 
-    run().catch(e => { console.error("[CALLEE] error:", e); setDiag("Ошибка: " + String(e?.message || e)); });
+    run().catch(e => { log("❌ Exception: " + String((e as Error)?.message || e)); });
     return () => { stopAll(true); };
   }, [callId, callType, stopAll, onClose]);
 
   const endCall = () => { stopAll(true); onClose(); };
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col items-center justify-between bg-gradient-to-b from-violet-900 to-indigo-900 p-8 animate-fade-in">
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-between bg-gradient-to-b from-violet-900 to-indigo-900 p-4 animate-fade-in">
       {callType === "video" && (
         <div className="absolute inset-0">
           <video ref={remoteVideoRef} className="w-full h-full object-cover" playsInline autoPlay />
@@ -1292,13 +1294,19 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
         </div>
       )}
       {callType === "audio" && <audio ref={remoteAudioRef} autoPlay />}
-      <div className="relative flex flex-col items-center mt-12 z-10 text-center px-4">
-        <Avatar label={callerName} color={callerColor} size={100} src={callerAvatar} />
-        <h2 className="text-white font-bold text-2xl mt-4">{callerName}</h2>
-        <p className="text-white/70 text-sm mt-1">{connectedRef.current ? fmt(seconds) : "Соединение..."}</p>
-        {diagMsg && <p className="text-white/40 text-xs mt-2">{diagMsg}</p>}
+      <div className="relative flex flex-col items-center mt-8 z-10 text-center px-4 w-full">
+        <Avatar label={callerName} color={callerColor} size={80} src={callerAvatar} />
+        <h2 className="text-white font-bold text-xl mt-3">{callerName}</h2>
+        <p className="text-white/70 text-sm mt-1">{connected ? fmt(seconds) : "Соединение..."}</p>
+        {!connected && logs.length > 0 && (
+          <div className="mt-3 w-full max-w-xs bg-black/40 rounded-xl p-2 text-left">
+            {logs.map((l, i) => (
+              <p key={i} className={`text-xs font-mono leading-5 ${l.startsWith("❌") ? "text-red-400" : l.startsWith("⚠️") ? "text-yellow-400" : "text-white/60"}`}>{l}</p>
+            ))}
+          </div>
+        )}
       </div>
-      <div className="relative flex items-center gap-6 z-10 mb-8">
+      <div className="relative flex items-center gap-6 z-10 mb-6">
         <button onClick={() => { streamRef.current?.getAudioTracks().forEach(t => { t.enabled = !t.enabled; }); setMuted(v => !v); }}
           className={`w-14 h-14 rounded-full ${muted ? "bg-red-500" : "bg-white/20"} text-white flex items-center justify-center`}>
           <Icon name={muted ? "MicOff" : "Mic"} size={22} />
