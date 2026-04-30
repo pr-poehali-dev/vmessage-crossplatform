@@ -875,15 +875,29 @@ function UserProfileModal({ user: initialUser, onClose, onStartChat, currentUser
 }
 
 // ─── WebRTC helpers ────────────────────────────────────────────────────────────
-const ICE_SERVERS = [
+const FALLBACK_ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun.relay.metered.ca:80" },
-  { urls: "turn:global.relay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:global.relay.metered.ca:80?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:global.relay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:global.relay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "stun:stun.cloudflare.com:3478" },
+  { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:80?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
 ];
+
+async function getIceServers(): Promise<RTCIceServer[]> {
+  try {
+    const res = await callsApi.getIceConfig();
+    if (res.ok && Array.isArray(res.ice_servers) && res.ice_servers.length > 0) {
+      console.log("[ICE] got", res.ice_servers.length, "servers from backend");
+      return res.ice_servers;
+    }
+  } catch (e) {
+    console.warn("[ICE] failed to fetch from backend:", e);
+  }
+  console.log("[ICE] using fallback servers");
+  return FALLBACK_ICE_SERVERS;
+}
 
 async function getMedia(isVideo: boolean): Promise<{ stream: MediaStream; error?: string }> {
   if (!navigator.mediaDevices?.getUserMedia) {
@@ -970,8 +984,11 @@ function CallModal({ chat, calleeId, type, onClose }: {
       }
 
       setDiag("Начало звонка...");
-      const initRes = await callsApi.initiate(calleeId, type);
-      console.log("[CALL] initiate:", initRes);
+      const [initRes, iceServers] = await Promise.all([
+        callsApi.initiate(calleeId, type),
+        getIceServers(),
+      ]);
+      console.log("[CALL] initiate:", initRes, "ICE servers:", iceServers.length);
       if (!initRes.ok || !aliveRef.current) {
         setDiag("Не удалось начать звонок: " + (initRes.error || "ошибка сети"));
         setTimeout(onClose, 2000);
@@ -979,7 +996,7 @@ function CallModal({ chat, calleeId, type, onClose }: {
       }
       callIdRef.current = initRes.call_id;
 
-      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      const pc = new RTCPeerConnection({ iceServers });
       pcRef.current = pc;
       stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
@@ -1165,7 +1182,11 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
     aliveRef.current = true;
     const run = async () => {
       setDiag("Запрос доступа к микрофону...");
-      const { stream, error: mediaErr } = await getMedia(callType === "video");
+      const [{ stream, error: mediaErr }, iceServers, firstOffer] = await Promise.all([
+        getMedia(callType === "video"),
+        getIceServers(),
+        callsApi.getOffer(callId),
+      ]);
       if (!aliveRef.current) { stream.getTracks().forEach(t => t.stop()); return; }
       if (mediaErr) setDiag(mediaErr);
       streamRef.current = stream;
@@ -1174,7 +1195,7 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
       }
 
       setDiag("Получение оффера...");
-      let offerRes = await callsApi.getOffer(callId);
+      let offerRes = firstOffer;
       console.log("[CALLEE] getOffer:", offerRes.ok, "has offer:", !!offerRes.offer);
 
       // Retry up to 5 times if offer not yet ready
@@ -1190,7 +1211,8 @@ function ActiveCallModal({ callId, callerName, callerColor, callerAvatar, callTy
         stopAll(); setTimeout(onClose, 2000); return;
       }
 
-      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      const pc = new RTCPeerConnection({ iceServers });
+      console.log("[CALLEE] PeerConnection created with", iceServers.length, "ICE servers");
       pcRef.current = pc;
       stream.getTracks().forEach(t => pc.addTrack(t, stream));
 

@@ -400,6 +400,31 @@ def handler(event: dict, context) -> dict:
             "has_answer": row[2] is not None and row[2] != "",
         })
 
+    # ── 13. get_ice_config — dynamic TURN credentials ─────────────────────────
+    if action == "get_ice_config" and method == "GET":
+        cur.close(); conn.close()
+        api_key = os.environ.get("METERED_API_KEY", "")
+        if api_key:
+            import urllib.request
+            try:
+                url = f"https://vmessage.metered.live/api/v1/turn/credentials?apiKey={api_key}"
+                with urllib.request.urlopen(url, timeout=5) as r:
+                    ice_servers = json.loads(r.read())
+                return resp(200, {"ok": True, "ice_servers": ice_servers})
+            except Exception as e:
+                pass
+        # Fallback: multiple reliable public TURN servers
+        ice_servers = [
+            {"urls": "stun:stun.l.google.com:19302"},
+            {"urls": "stun:stun1.l.google.com:19302"},
+            {"urls": "stun:stun.cloudflare.com:3478"},
+            {"urls": "turn:openrelay.metered.ca:80", "username": "openrelayproject", "credential": "openrelayproject"},
+            {"urls": "turn:openrelay.metered.ca:443", "username": "openrelayproject", "credential": "openrelayproject"},
+            {"urls": "turn:openrelay.metered.ca:443?transport=tcp", "username": "openrelayproject", "credential": "openrelayproject"},
+            {"urls": "turn:openrelay.metered.ca:80?transport=tcp", "username": "openrelayproject", "credential": "openrelayproject"},
+        ]
+        return resp(200, {"ok": True, "ice_servers": ice_servers})
+
     # ── unknown action ────────────────────────────────────────────────────────
     cur.close(); conn.close()
     return resp(400, {"error": f"Неизвестный action: '{action}'"})
