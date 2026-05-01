@@ -174,7 +174,7 @@ function Avatar({ label, color, size = 42, status, src }: {
 // ─── Auth Screen ─────────────────────────────────────────────────────────────
 function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void }) {
   const [tab, setTab] = useState<"login" | "register">("login");
-  const [username, setUsername] = useState("");
+  const [phone, setPhone] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -186,9 +186,9 @@ function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void })
     try {
       let res;
       if (tab === "login") {
-        res = await authApi.login(username.trim(), password);
+        res = await authApi.login(phone.trim(), password);
       } else {
-        res = await authApi.register(username.trim(), displayName.trim(), password);
+        res = await authApi.register(phone.trim(), displayName.trim(), password);
       }
       if (res.ok) {
         saveSession(res.token, res.user);
@@ -232,9 +232,10 @@ function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void })
               </div>
             )}
             <div className="relative">
-              <Icon name="AtSign" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-              <input value={username} onChange={e => setUsername(e.target.value)}
-                placeholder="Имя пользователя (@username)"
+              <Icon name="Phone" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <input value={phone} onChange={e => setPhone(e.target.value)}
+                placeholder="Номер телефона (+7...)"
+                type="tel"
                 className="w-full bg-secondary rounded-xl pl-9 pr-4 py-3 text-sm outline-none focus:ring-2 focus:ring-violet-400/40 transition-all" />
             </div>
             <div className="relative">
@@ -2098,6 +2099,9 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
   const [saving, setSaving] = useState(false);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [showAvatarMenu, setShowAvatarMenu] = useState(false);
+  const [newUsername, setNewUsername] = useState("");
+  const [usernameError, setUsernameError] = useState("");
+  const [savingUsername, setSavingUsername] = useState(false);
   const avatarInputRef = useRef<HTMLInputElement>(null);
 
   const save = async () => {
@@ -2108,6 +2112,22 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
       setEditing(false);
     }
     setSaving(false);
+  };
+
+  const saveUsername = async () => {
+    const trimmed = newUsername.trim();
+    if (!trimmed) { setUsernameError("Введите имя пользователя"); return; }
+    if (!/^[a-zA-Z0-9_]{3,32}$/.test(trimmed)) { setUsernameError("Только латиница, цифры и _, от 3 до 32 символов"); return; }
+    setSavingUsername(true);
+    setUsernameError("");
+    const res = await authApi.changeUsername(trimmed);
+    if (res.ok) {
+      onUpdate({ ...me, username: res.username });
+      setNewUsername("");
+    } else {
+      setUsernameError(res.error || "Не удалось сменить имя пользователя");
+    }
+    setSavingUsername(false);
   };
 
   const handleAvatarChange = async (file: File) => {
@@ -2240,6 +2260,32 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
         ))}
       </div>
 
+      {/* Change username block */}
+      <div className="mx-4 mt-4 bg-card rounded-3xl p-4 space-y-3 flex-shrink-0">
+        <div className="flex items-center justify-between mb-1">
+          <span className="font-semibold text-sm">Имя пользователя</span>
+        </div>
+        <div>
+          <label className="text-xs text-muted-foreground mb-1 block">Текущий: @{me.username}</label>
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Icon name="AtSign" size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <input
+                value={newUsername}
+                onChange={e => { setNewUsername(e.target.value); setUsernameError(""); }}
+                placeholder="новый_юзернейм"
+                className="w-full bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-violet-400/40 transition-all"
+              />
+            </div>
+            <button onClick={saveUsername} disabled={savingUsername || !newUsername.trim()}
+              className="px-3 py-2 rounded-xl text-xs font-semibold vm-gradient-bg text-white shadow-lg shadow-violet-500/30 disabled:opacity-60 whitespace-nowrap">
+              {savingUsername ? "..." : "Сменить"}
+            </button>
+          </div>
+          {usernameError && <p className="text-xs text-red-400 mt-1">{usernameError}</p>}
+        </div>
+      </div>
+
       <div className="mx-4 mt-4 mb-4 bg-card rounded-3xl p-2 flex-shrink-0">
         <button onClick={onLogout}
           className="w-full flex items-center gap-3 px-3 py-3 rounded-2xl hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors text-red-500">
@@ -2249,6 +2295,127 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
           <span className="text-sm font-medium">Выйти из аккаунта</span>
         </button>
       </div>
+    </div>
+  );
+}
+
+// ─── Sticker Packs Manager ────────────────────────────────────────────────────
+function StickerPacksManager() {
+  const [packs, setPacks] = useState<{id: number; name: string; cover_url: string|null; sticker_count: number; is_public: boolean; owner_id: number; stickers?: {id:number;image_url:string;emoji:string}[]}[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [createName, setCreateName] = useState("");
+  const [isPublic, setIsPublic] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [expandedPack, setExpandedPack] = useState<number|null>(null);
+  const [addingSticker, setAddingSticker] = useState<number|null>(null);
+  const [stickerEmoji, setStickerEmoji] = useState("");
+  const stickerFileRef = useRef<HTMLInputElement>(null);
+
+  const load = async () => {
+    setLoading(true);
+    const res = await chatsApi.getMyPacks();
+    if (res.ok) setPacks(res.packs || []);
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const createPack = async () => {
+    if (!createName.trim()) return;
+    setCreating(true);
+    const res = await chatsApi.createPack(createName.trim(), isPublic);
+    if (res.ok) { await load(); setShowCreate(false); setCreateName(""); setIsPublic(false); }
+    setCreating(false);
+  };
+
+  const uploadSticker = async (packId: number, file: File) => {
+    setAddingSticker(packId);
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const base64 = (reader.result as string).split(",")[1];
+      const res = await chatsApi.addSticker(packId, base64, file.type, stickerEmoji);
+      if (res.ok) { await load(); setStickerEmoji(""); }
+      setAddingSticker(null);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  return (
+    <div className="mx-4 mt-4 bg-card rounded-3xl p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="font-semibold text-sm">Мои стикер-паки</span>
+        <button onClick={() => setShowCreate(v => !v)}
+          className="px-3 py-1.5 rounded-xl text-xs font-medium vm-gradient-bg text-white shadow-md shadow-violet-500/30">
+          + Создать
+        </button>
+      </div>
+
+      {showCreate && (
+        <div className="bg-secondary rounded-2xl p-3 space-y-2">
+          <input value={createName} onChange={e => setCreateName(e.target.value)}
+            placeholder="Название пака"
+            className="w-full bg-card rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-violet-400/40" />
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox" checked={isPublic} onChange={e => setIsPublic(e.target.checked)} className="accent-violet-500" />
+            Публичный (виден всем)
+          </label>
+          <button onClick={createPack} disabled={creating || !createName.trim()}
+            className="w-full py-2 rounded-xl text-sm font-medium vm-gradient-bg text-white disabled:opacity-60">
+            {creating ? "Создание..." : "Создать пак"}
+          </button>
+        </div>
+      )}
+
+      {loading ? (
+        <p className="text-sm text-muted-foreground text-center py-2">Загрузка...</p>
+      ) : packs.length === 0 ? (
+        <p className="text-sm text-muted-foreground text-center py-2">Пока нет паков. Создай первый!</p>
+      ) : (
+        packs.map(pack => (
+          <div key={pack.id} className="bg-secondary rounded-2xl p-3">
+            <div className="flex items-center gap-3">
+              {pack.cover_url ? (
+                <img src={pack.cover_url} alt="" className="w-10 h-10 rounded-xl object-contain bg-card" />
+              ) : (
+                <div className="w-10 h-10 rounded-xl bg-card flex items-center justify-center text-xl">🎨</div>
+              )}
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-sm truncate">{pack.name}</div>
+                <div className="text-xs text-muted-foreground">{pack.sticker_count} стикеров · {pack.is_public ? "публичный" : "приватный"}</div>
+              </div>
+              <button onClick={() => setExpandedPack(expandedPack === pack.id ? null : pack.id)}
+                className="p-1.5 rounded-lg hover:bg-card transition-colors">
+                <Icon name={expandedPack === pack.id ? "ChevronUp" : "ChevronDown"} size={16} className="text-muted-foreground" />
+              </button>
+            </div>
+
+            {expandedPack === pack.id && (
+              <div className="mt-3 pt-3 border-t border-border">
+                {pack.stickers && pack.stickers.length > 0 && (
+                  <div className="grid grid-cols-5 gap-1 mb-3">
+                    {pack.stickers.map(s => (
+                      <img key={s.id} src={s.image_url} alt={s.emoji} className="w-12 h-12 object-contain rounded-lg bg-card p-1" />
+                    ))}
+                  </div>
+                )}
+                <div className="flex gap-2 items-center">
+                  <input value={stickerEmoji} onChange={e => setStickerEmoji(e.target.value)}
+                    placeholder="😀 эмодзи"
+                    className="w-16 bg-card rounded-xl px-2 py-1.5 text-sm outline-none text-center" />
+                  <button onClick={() => stickerFileRef.current?.click()}
+                    disabled={addingSticker === pack.id}
+                    className="flex-1 py-1.5 rounded-xl text-xs font-medium bg-violet-500/20 text-violet-400 hover:bg-violet-500/30 transition-colors disabled:opacity-60">
+                    {addingSticker === pack.id ? "Загрузка..." : "+ Добавить стикер"}
+                  </button>
+                  <input ref={stickerFileRef} type="file" accept="image/*" className="hidden"
+                    onChange={e => e.target.files?.[0] && uploadSticker(pack.id, e.target.files[0])} />
+                </div>
+              </div>
+            )}
+          </div>
+        ))
+      )}
     </div>
   );
 }
@@ -2365,6 +2532,8 @@ function SettingsSection() {
         )}
       </div>
 
+      <StickerPacksManager />
+
       <div className="mx-4 mt-4 bg-card rounded-3xl p-4">
         <div className="flex items-center gap-2 mb-1">
           <Icon name="Info" size={15} className="text-violet-500" />
@@ -2426,6 +2595,11 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
   const [inviteCode, setInviteCode] = useState("");
+  const [ctxMenu, setCtxMenu] = useState<{msgId: number; x: number; y: number; out: boolean} | null>(null);
+  const [reactions, setReactions] = useState<Record<string, {emoji: string; count: number; my: boolean}[]>>({});
+  const [showStickerPanel, setShowStickerPanel] = useState(false);
+  const [stickerPacks, setStickerPacks] = useState<{id: number; name: string; stickers: {id: number; image_url: string; emoji: string}[]}[]>([]);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout>>();
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const [showScrollDown, setShowScrollDown] = useState(false);
@@ -2485,6 +2659,8 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
         prevMsgCount.current = newMsgs.length;
         return newMsgs;
       });
+      const rRes = await chatsApi.getReactions(chat.id);
+      if (rRes.ok) setReactions(rRes.reactions);
     }
     setLoading(false);
   }, [chat.id, chat.name]);
@@ -2612,6 +2788,27 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     if (res.ok) onDeleteChat(chat.id);
   };
 
+  const openCtxMenu = (e: React.MouseEvent | React.TouchEvent, m: Message) => {
+    e.preventDefault();
+    const x = 'clientX' in e ? e.clientX : e.touches[0].clientX;
+    const y = 'clientY' in e ? e.clientY : e.touches[0].clientY;
+    setCtxMenu({ msgId: m.id, x, y, out: m.out });
+  };
+
+  const handleReaction = async (msgId: number, emoji: string) => {
+    const res = await chatsApi.toggleReaction(msgId, emoji);
+    if (res.ok) {
+      setReactions(prev => ({ ...prev, [String(msgId)]: res.reactions }));
+    }
+  };
+
+  useEffect(() => {
+    if (showStickerPanel) {
+      chatsApi.getMyPacks().then(res => {
+        if (res.ok) setStickerPacks(res.packs);
+      });
+    }
+  }, [showStickerPanel]);
 
 
   const renderMessage = (m: Message) => {
@@ -2627,66 +2824,119 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     const isFile = m.type === "file";
     const isAudio = m.type === "audio";
     const isLocation = m.type === "location";
+    const isSticker = m.type === "sticker";
     const hasMedia = m.media_url;
 
+    const ctxHandlers = {
+      onContextMenu: (e: React.MouseEvent) => openCtxMenu(e, m),
+      onTouchStart: (e: React.TouchEvent) => { longPressTimer.current = setTimeout(() => openCtxMenu(e, m), 500); },
+      onTouchEnd: () => clearTimeout(longPressTimer.current),
+      onTouchMove: () => clearTimeout(longPressTimer.current),
+    };
+
+    const msgReactions = reactions[String(m.id)];
+    const ReactionsRow = msgReactions && msgReactions.length > 0 ? (
+      <div className={`flex flex-wrap gap-1 mt-1 ${m.out ? "justify-end" : "justify-start"}`}>
+        {msgReactions.map(r => (
+          <button key={r.emoji}
+            onClick={() => handleReaction(m.id, r.emoji)}
+            className={`flex items-center gap-0.5 px-2 py-0.5 rounded-full text-xs border transition-all ${r.my ? "bg-violet-500/20 border-violet-500/50 text-violet-300" : "bg-secondary border-border text-muted-foreground hover:bg-violet-500/10"}`}>
+            {r.emoji} <span>{r.count}</span>
+          </button>
+        ))}
+      </div>
+    ) : null;
+
     if (isVideoNote) {
-      return <VideoNoteMessage m={m} />;
+      return (
+        <div className={`flex flex-col ${m.out ? "items-end" : "items-start"} animate-fade-in`}>
+          <div className={`flex ${m.out ? "justify-end" : "justify-start"} w-full`} {...ctxHandlers}>
+            <VideoNoteMessage m={m} />
+          </div>
+          {ReactionsRow}
+        </div>
+      );
+    }
+
+    if (isSticker && hasMedia) {
+      return (
+        <div className={`flex flex-col ${m.out ? "items-end" : "items-start"} animate-fade-in`}>
+          <div className={`flex ${m.out ? "justify-end" : "justify-start"}`} {...ctxHandlers}>
+            <div className="max-w-[160px]">
+              <img src={m.media_url} alt="sticker" className="w-32 h-32 object-contain" />
+              <div className={`flex items-center justify-end gap-1 text-[10px] mt-0.5 ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
+                <span>{m.time}</span>
+              </div>
+            </div>
+          </div>
+          {ReactionsRow}
+        </div>
+      );
     }
 
     if (isVoice) {
       const dur = m.text?.match(/(\d+)с/) ? parseInt(m.text.match(/(\d+)с/)![1]) : 0;
       return (
-        <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
-          {hasMedia ? (
-            <VoiceMessage
-              mediaUrl={m.media_url!}
-              dur={dur}
-              time={m.time}
-              isOut={!!m.out}
-              status={m.status}
-            />
-          ) : (
-            <div className={`flex items-center gap-2 px-3 py-2.5 rounded-2xl max-w-[260px] w-[220px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
-              <div className="flex items-center gap-0.5 h-5 flex-1">
-                {[...Array(12)].map((_, i) => (
-                  <div key={i} className={`w-1 rounded-full ${m.out ? "bg-white/60" : "bg-violet-300"}`}
-                    style={{ height: `${30 + Math.sin(i * 1.3) * 50}%` }} />
-                ))}
+        <div className={`flex flex-col ${m.out ? "items-end" : "items-start"} animate-fade-in`}>
+          <div className={`flex ${m.out ? "justify-end" : "justify-start"} w-full`} {...ctxHandlers}>
+            {hasMedia ? (
+              <VoiceMessage
+                mediaUrl={m.media_url!}
+                dur={dur}
+                time={m.time}
+                isOut={!!m.out}
+                status={m.status}
+              />
+            ) : (
+              <div className={`flex items-center gap-2 px-3 py-2.5 rounded-2xl max-w-[260px] w-[220px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
+                <div className="flex items-center gap-0.5 h-5 flex-1">
+                  {[...Array(12)].map((_, i) => (
+                    <div key={i} className={`w-1 rounded-full ${m.out ? "bg-white/60" : "bg-violet-300"}`}
+                      style={{ height: `${30 + Math.sin(i * 1.3) * 50}%` }} />
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
+          {ReactionsRow}
         </div>
       );
     }
 
     if (isImage && hasMedia) {
       return (
-        <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
-          <div className="max-w-[240px]">
-            <img src={m.media_url} alt="фото" className="rounded-2xl w-full object-cover max-h-64 cursor-pointer hover:opacity-90 transition-opacity"
-              onClick={() => window.open(m.media_url, "_blank")} />
-            <div className={`flex items-center justify-end gap-1 mt-1 text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
-              <span>{m.time}</span>
-              {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={10} className="text-cyan-300" /> : <Icon name="CheckCheck" size={10} />)}
+        <div className={`flex flex-col ${m.out ? "items-end" : "items-start"} animate-fade-in`}>
+          <div className={`flex ${m.out ? "justify-end" : "justify-start"} w-full`} {...ctxHandlers}>
+            <div className="max-w-[240px]">
+              <img src={m.media_url} alt="фото" className="rounded-2xl w-full object-cover max-h-64 cursor-pointer hover:opacity-90 transition-opacity"
+                onClick={() => window.open(m.media_url, "_blank")} />
+              <div className={`flex items-center justify-end gap-1 mt-1 text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
+                <span>{m.time}</span>
+                {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={10} className="text-cyan-300" /> : <Icon name="CheckCheck" size={10} />)}
+              </div>
             </div>
           </div>
+          {ReactionsRow}
         </div>
       );
     }
 
     if (isVideo && hasMedia) {
       return (
-        <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
-          <div className="max-w-[240px]">
-            <video className="rounded-2xl w-full max-h-48 bg-black" controls playsInline preload="metadata">
-              <source src={m.media_url} type="video/mp4" />
-              <source src={m.media_url} type="video/webm" />
-            </video>
-            <div className={`flex items-center justify-end gap-1 mt-1 text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
-              <span>{m.time}</span>
-              {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={10} className="text-cyan-300" /> : <Icon name="CheckCheck" size={10} />)}
+        <div className={`flex flex-col ${m.out ? "items-end" : "items-start"} animate-fade-in`}>
+          <div className={`flex ${m.out ? "justify-end" : "justify-start"} w-full`} {...ctxHandlers}>
+            <div className="max-w-[240px]">
+              <video className="rounded-2xl w-full max-h-48 bg-black" controls playsInline preload="metadata">
+                <source src={m.media_url} type="video/mp4" />
+                <source src={m.media_url} type="video/webm" />
+              </video>
+              <div className={`flex items-center justify-end gap-1 mt-1 text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
+                <span>{m.time}</span>
+                {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={10} className="text-cyan-300" /> : <Icon name="CheckCheck" size={10} />)}
+              </div>
             </div>
           </div>
+          {ReactionsRow}
         </div>
       );
     }
@@ -2694,20 +2944,23 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     if (isAudio && hasMedia) {
       const fname = m.text?.replace("🎵 ", "") || "Аудио";
       return (
-        <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
-          <div className={`flex flex-col gap-1.5 px-3 py-2.5 rounded-2xl max-w-[260px] w-[230px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
-            <div className="flex items-center gap-2">
-              <Icon name="Music" size={14} className={m.out ? "text-white/70" : "text-violet-400"} />
-              <span className="text-xs font-medium truncate flex-1">{fname}</span>
-            </div>
-            <audio controls preload="metadata" className="w-full h-8" style={{ colorScheme: "dark" }}>
-              <source src={m.media_url} />
-            </audio>
-            <div className={`flex items-center justify-end gap-1 text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
-              <span>{m.time}</span>
-              {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={10} className="text-cyan-300" /> : <Icon name="CheckCheck" size={10} />)}
+        <div className={`flex flex-col ${m.out ? "items-end" : "items-start"} animate-fade-in`}>
+          <div className={`flex ${m.out ? "justify-end" : "justify-start"} w-full`} {...ctxHandlers}>
+            <div className={`flex flex-col gap-1.5 px-3 py-2.5 rounded-2xl max-w-[260px] w-[230px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
+              <div className="flex items-center gap-2">
+                <Icon name="Music" size={14} className={m.out ? "text-white/70" : "text-violet-400"} />
+                <span className="text-xs font-medium truncate flex-1">{fname}</span>
+              </div>
+              <audio controls preload="metadata" className="w-full h-8" style={{ colorScheme: "dark" }}>
+                <source src={m.media_url} />
+              </audio>
+              <div className={`flex items-center justify-end gap-1 text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
+                <span>{m.time}</span>
+                {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={10} className="text-cyan-300" /> : <Icon name="CheckCheck" size={10} />)}
+              </div>
             </div>
           </div>
+          {ReactionsRow}
         </div>
       );
     }
@@ -2717,22 +2970,25 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
       const ext = fname.includes(".") ? fname.split(".").pop()?.toLowerCase() : "";
       const iconName = ext === "pdf" ? "FileText" : ext === "zip" || ext === "rar" || ext === "7z" ? "Archive" : ext === "apk" ? "Smartphone" : ext === "doc" || ext === "docx" ? "FileText" : "File";
       return (
-        <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
-          <div className={`flex items-center gap-3 px-4 py-3 rounded-2xl max-w-[240px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
-            <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${m.out ? "bg-white/20" : "bg-violet-100 dark:bg-violet-900"}`}>
-              <Icon name={iconName as AnyIcon} size={18} className={m.out ? "text-white" : "text-violet-500"} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-xs font-medium truncate">{fname}</div>
-              <div className="flex items-center gap-2 mt-0.5">
-                {ext && <span className={`text-[10px] uppercase font-bold ${m.out ? "text-white/50" : "text-muted-foreground"}`}>{ext}</span>}
-                <button onClick={() => hasMedia && window.open(m.media_url, "_blank")}
-                  className={`text-[10px] underline ${m.out ? "text-white/70" : "text-violet-500"}`}>
-                  Скачать
-                </button>
+        <div className={`flex flex-col ${m.out ? "items-end" : "items-start"} animate-fade-in`}>
+          <div className={`flex ${m.out ? "justify-end" : "justify-start"} w-full`} {...ctxHandlers}>
+            <div className={`flex items-center gap-3 px-4 py-3 rounded-2xl max-w-[240px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
+              <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${m.out ? "bg-white/20" : "bg-violet-100 dark:bg-violet-900"}`}>
+                <Icon name={iconName as AnyIcon} size={18} className={m.out ? "text-white" : "text-violet-500"} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-medium truncate">{fname}</div>
+                <div className="flex items-center gap-2 mt-0.5">
+                  {ext && <span className={`text-[10px] uppercase font-bold ${m.out ? "text-white/50" : "text-muted-foreground"}`}>{ext}</span>}
+                  <button onClick={() => hasMedia && window.open(m.media_url, "_blank")}
+                    className={`text-[10px] underline ${m.out ? "text-white/70" : "text-violet-500"}`}>
+                    Скачать
+                  </button>
+                </div>
               </div>
             </div>
           </div>
+          {ReactionsRow}
         </div>
       );
     }
@@ -2741,51 +2997,57 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
       let loc = { lat: 0, lon: 0, address: "" };
       try { loc = JSON.parse(m.text || "{}"); } catch (e) { void e; }
       return (
-        <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
-          <div className={`rounded-2xl overflow-hidden max-w-[240px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
-            <a href={`https://maps.google.com/?q=${loc.lat},${loc.lon}`} target="_blank" rel="noreferrer"
-              className="block">
-              <div className="relative">
-                <img
-                  src={`https://static-maps.yandex.ru/1.x/?lang=ru_RU&ll=${loc.lon},${loc.lat}&z=14&l=map&size=240,120&pt=${loc.lon},${loc.lat},pm2rdm`}
-                  alt="карта" className="w-full h-24 object-cover" onError={e => { (e.target as HTMLImageElement).style.display="none"; }}
-                />
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="w-8 h-8 rounded-full bg-red-500 flex items-center justify-center shadow-lg">
-                    <Icon name="MapPin" size={16} className="text-white" />
+        <div className={`flex flex-col ${m.out ? "items-end" : "items-start"} animate-fade-in`}>
+          <div className={`flex ${m.out ? "justify-end" : "justify-start"} w-full`} {...ctxHandlers}>
+            <div className={`rounded-2xl overflow-hidden max-w-[240px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
+              <a href={`https://maps.google.com/?q=${loc.lat},${loc.lon}`} target="_blank" rel="noreferrer"
+                className="block">
+                <div className="relative">
+                  <img
+                    src={`https://static-maps.yandex.ru/1.x/?lang=ru_RU&ll=${loc.lon},${loc.lat}&z=14&l=map&size=240,120&pt=${loc.lon},${loc.lat},pm2rdm`}
+                    alt="карта" className="w-full h-24 object-cover" onError={e => { (e.target as HTMLImageElement).style.display="none"; }}
+                  />
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <div className="w-8 h-8 rounded-full bg-red-500 flex items-center justify-center shadow-lg">
+                      <Icon name="MapPin" size={16} className="text-white" />
+                    </div>
                   </div>
                 </div>
+                <div className="px-3 py-2">
+                  <div className={`text-xs font-medium ${m.out ? "text-white" : "text-foreground"}`}>📍 Геолокация</div>
+                  <div className={`text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>{loc.address || `${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`}</div>
+                </div>
+              </a>
+              <div className={`flex items-center justify-end gap-1 pb-2 px-3 text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
+                <span>{m.time}</span>
+                {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={10} className="text-cyan-300" /> : <Icon name="CheckCheck" size={10} />)}
               </div>
-              <div className="px-3 py-2">
-                <div className={`text-xs font-medium ${m.out ? "text-white" : "text-foreground"}`}>📍 Геолокация</div>
-                <div className={`text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>{loc.address || `${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`}</div>
-              </div>
-            </a>
-            <div className={`flex items-center justify-end gap-1 pb-2 px-3 text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
-              <span>{m.time}</span>
-              {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={10} className="text-cyan-300" /> : <Icon name="CheckCheck" size={10} />)}
             </div>
           </div>
+          {ReactionsRow}
         </div>
       );
     }
 
     return (
-      <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
-        <div className={`max-w-[72%] px-4 py-2.5 text-sm ${m.out ? "vm-msg-out" : "vm-msg-in dark:text-white text-gray-800"}`}>
-          {!m.out && (chat.type === "group" || chat.type === "channel") && m.sender_name && (
-            <div className="text-xs font-semibold mb-1" style={{ color: m.sender_color || "#8b5cf6" }}>{m.sender_name}</div>
-          )}
-          <p className="leading-relaxed whitespace-pre-wrap">{m.text}</p>
-          <div className={`flex items-center justify-end gap-1 mt-1 ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
-            <span className="text-[10px]">{m.time}</span>
-            {m.out && (
-              m.status === "read" ? <Icon name="CheckCheck" size={12} className="text-cyan-300" /> :
-              m.status === "delivered" ? <Icon name="CheckCheck" size={12} /> :
-              <Icon name="Check" size={12} />
+      <div className={`flex flex-col ${m.out ? "items-end" : "items-start"} animate-fade-in`}>
+        <div className={`flex ${m.out ? "justify-end" : "justify-start"} w-full`} {...ctxHandlers}>
+          <div className={`max-w-[72%] px-4 py-2.5 text-sm ${m.out ? "vm-msg-out" : "vm-msg-in dark:text-white text-gray-800"}`}>
+            {!m.out && (chat.type === "group" || chat.type === "channel") && m.sender_name && (
+              <div className="text-xs font-semibold mb-1" style={{ color: m.sender_color || "#8b5cf6" }}>{m.sender_name}</div>
             )}
+            <p className="leading-relaxed whitespace-pre-wrap">{m.text}</p>
+            <div className={`flex items-center justify-end gap-1 mt-1 ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
+              <span className="text-[10px]">{m.time}</span>
+              {m.out && (
+                m.status === "read" ? <Icon name="CheckCheck" size={12} className="text-cyan-300" /> :
+                m.status === "delivered" ? <Icon name="CheckCheck" size={12} /> :
+                <Icon name="Check" size={12} />
+              )}
+            </div>
           </div>
         </div>
+        {ReactionsRow}
       </div>
     );
   };
@@ -2809,6 +3071,50 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
               className="w-full mt-3 vm-gradient-bg text-white font-semibold py-3 rounded-xl">
               Скопировать
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Context Menu */}
+      {ctxMenu && (
+        <div
+          className="fixed inset-0 z-50"
+          onClick={() => setCtxMenu(null)}
+        >
+          <div
+            className="absolute bg-card rounded-2xl shadow-2xl border border-border p-1 min-w-[180px] animate-scale-in z-50"
+            style={{
+              left: Math.min(ctxMenu.x, window.innerWidth - 200),
+              top: Math.min(ctxMenu.y, window.innerHeight - 200)
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Quick reactions row */}
+            <div className="flex gap-1 px-2 py-2 border-b border-border">
+              {["👍","❤️","😂","😮","😢","🔥"].map(emoji => (
+                <button key={emoji}
+                  onClick={async () => {
+                    await handleReaction(ctxMenu.msgId, emoji);
+                    setCtxMenu(null);
+                  }}
+                  className="text-xl hover:scale-125 transition-transform w-8 h-8 flex items-center justify-center rounded-lg hover:bg-secondary">
+                  {emoji}
+                </button>
+              ))}
+            </div>
+            {/* Delete (own messages only) */}
+            {ctxMenu.out && (
+              <button onClick={async () => {
+                const res = await chatsApi.deleteMessage(ctxMenu.msgId);
+                if (res.ok) {
+                  setMessages(prev => prev.filter(m => m.id !== ctxMenu.msgId));
+                }
+                setCtxMenu(null);
+              }} className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-red-500/10 text-red-400 text-sm transition-colors">
+                <Icon name="Trash2" size={16} />
+                Удалить
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -2843,16 +3149,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
             </button>
           </>
         )}
-        {chat.type === "private" && chat.partner_id && (
-          <>
-            <button onClick={() => setShowCall("audio")} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground" title="Аудиозвонок">
-              <Icon name="Phone" size={18} />
-            </button>
-            <button onClick={() => setShowCall("video")} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground" title="Видеозвонок">
-              <Icon name="Video" size={18} />
-            </button>
-          </>
-        )}
+        {/* Звонки временно скрыты */}
         {/* Chat menu */}
         <div className="relative">
           <button onClick={() => setShowChatMenu(v => !v)} className="p-2 rounded-xl hover:bg-secondary transition-colors text-muted-foreground">
@@ -2972,6 +3269,43 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
               )}
             </div>
 
+            {/* Sticker button */}
+            <div className="relative flex-shrink-0">
+              <button onClick={() => { setShowStickerPanel(v => !v); setShowEmoji(false); setShowAttachMenu(false); }}
+                className={`w-8 h-8 flex items-center justify-center rounded-xl hover:bg-secondary transition-colors ${showStickerPanel ? "text-violet-500" : "text-muted-foreground"}`}>
+                <Icon name="Sticker" fallback="Smile" size={18} />
+              </button>
+              {showStickerPanel && (
+                <div className="absolute bottom-full left-0 mb-2 bg-card rounded-2xl shadow-2xl border border-border z-50 animate-scale-in w-72">
+                  <div className="p-3 border-b border-border">
+                    <p className="text-sm font-semibold">Стикеры</p>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto p-2">
+                    {stickerPacks.length === 0 ? (
+                      <p className="text-center text-muted-foreground text-sm py-4">Нет стикеров.<br/>Добавь паки в настройках.</p>
+                    ) : (
+                      stickerPacks.map(pack => (
+                        <div key={pack.id} className="mb-3">
+                          <p className="text-xs text-muted-foreground mb-1 px-1">{pack.name}</p>
+                          <div className="grid grid-cols-4 gap-1">
+                            {pack.stickers?.map(s => (
+                              <button key={s.id} onClick={async () => {
+                                const res = await chatsApi.sendSticker(chat.id, s.id);
+                                if (res.ok) setMessages(prev => [...prev, {...res.message, sender_id: me.id, sender_name: me.display_name, sender_color: me.avatar_color, sender_username: me.username}]);
+                                setShowStickerPanel(false);
+                              }} className="w-16 h-16 rounded-xl hover:bg-secondary transition-colors flex items-center justify-center overflow-hidden">
+                                <img src={s.image_url} alt={s.emoji} className="w-14 h-14 object-contain" />
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="flex-1 bg-secondary rounded-2xl px-3 py-2 flex items-center min-h-[38px]">
               <input ref={inputRef} value={input} onChange={e => setInput(e.target.value)}
                 onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
@@ -3005,8 +3339,8 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
         <input ref={docInputRef} type="file" className="hidden" onChange={e => e.target.files?.[0] && sendFile(e.target.files[0], "file")} />
       </div>
 
-      {(showAttachMenu || showEmoji) && (
-        <div className="fixed inset-0 z-40" onClick={() => { setShowAttachMenu(false); setShowEmoji(false); }} />
+      {(showAttachMenu || showEmoji || showStickerPanel) && (
+        <div className="fixed inset-0 z-40" onClick={() => { setShowAttachMenu(false); setShowEmoji(false); setShowStickerPanel(false); }} />
       )}
     </div>
   );

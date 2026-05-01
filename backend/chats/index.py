@@ -728,5 +728,208 @@ def handler(event: dict, context) -> dict:
         cur.close(); conn.close()
         return resp(200, {"ok": True})
 
+    # delete_message — удалить своё сообщение
+    if action == "delete_message":
+        msg_id = body.get("message_id")
+        if not msg_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен message_id"})
+        cur.execute(f"SELECT sender_id FROM {SCHEMA}.vm_messages WHERE id=%s", (msg_id,))
+        row = cur.fetchone()
+        if not row:
+            cur.close(); conn.close()
+            return resp(404, {"error": "Сообщение не найдено"})
+        if row[0] != user_id:
+            cur.close(); conn.close()
+            return resp(403, {"error": "Можно удалять только свои сообщения"})
+        cur.execute(f"UPDATE {SCHEMA}.vm_messages SET is_hidden=TRUE WHERE id=%s", (msg_id,))
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
+
+    # toggle_reaction — поставить/убрать реакцию на сообщение
+    if action == "toggle_reaction":
+        msg_id = body.get("message_id")
+        emoji = (body.get("emoji") or "").strip()
+        if not msg_id or not emoji:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен message_id и emoji"})
+        # Проверяем доступ к чату через сообщение
+        cur.execute(f"SELECT chat_id FROM {SCHEMA}.vm_messages WHERE id=%s AND is_hidden=FALSE", (msg_id,))
+        msg_row = cur.fetchone()
+        if not msg_row:
+            cur.close(); conn.close()
+            return resp(404, {"error": "Сообщение не найдено"})
+        cur.execute(f"SELECT 1 FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (msg_row[0], user_id))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нет доступа"})
+        # Проверяем существующую реакцию
+        cur.execute(f"SELECT id FROM {SCHEMA}.vm_message_reactions WHERE message_id=%s AND user_id=%s AND emoji=%s", (msg_id, user_id, emoji))
+        existing = cur.fetchone()
+        if existing:
+            # Убираем реакцию
+            cur.execute(f"UPDATE {SCHEMA}.vm_message_reactions SET emoji=emoji WHERE id=%s", (existing[0],))
+            cur.execute(f"DELETE FROM {SCHEMA}.vm_message_reactions WHERE id=%s", (existing[0],))
+            action_done = "removed"
+        else:
+            cur.execute(f"INSERT INTO {SCHEMA}.vm_message_reactions (message_id, user_id, emoji) VALUES (%s, %s, %s)", (msg_id, user_id, emoji))
+            action_done = "added"
+        conn.commit()
+        # Возвращаем обновлённые реакции
+        cur.execute(f"SELECT emoji, COUNT(*) as cnt, bool_or(user_id=%s) as my FROM {SCHEMA}.vm_message_reactions WHERE message_id=%s GROUP BY emoji ORDER BY cnt DESC", (user_id, msg_id))
+        reactions = [{"emoji": r[0], "count": int(r[1]), "my": bool(r[2])} for r in cur.fetchall()]
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "action": action_done, "reactions": reactions})
+
+    # get_reactions — получить реакции для списка сообщений
+    if action == "get_reactions":
+        chat_id = qs.get("chat_id") or body.get("chat_id")
+        if not chat_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен chat_id"})
+        cur.execute(f"SELECT 1 FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нет доступа"})
+        cur.execute(f"""
+            SELECT r.message_id, r.emoji, COUNT(*) as cnt, bool_or(r.user_id=%s) as my
+            FROM {SCHEMA}.vm_message_reactions r
+            JOIN {SCHEMA}.vm_messages m ON m.id=r.message_id
+            WHERE m.chat_id=%s AND m.is_hidden=FALSE
+            GROUP BY r.message_id, r.emoji
+            ORDER BY r.message_id, cnt DESC
+        """, (user_id, chat_id))
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        result = {}
+        for r in rows:
+            mid = str(r[0])
+            if mid not in result:
+                result[mid] = []
+            result[mid].append({"emoji": r[1], "count": int(r[2]), "my": bool(r[3])})
+        return resp(200, {"ok": True, "reactions": result})
+
+    # sticker actions — get_sticker_packs, get_my_packs, create_pack, add_sticker, send_sticker, add_pack, remove_pack
+    if action == "get_sticker_packs":
+        cur.execute(f"""
+            SELECT sp.id, sp.name, sp.cover_url, sp.owner_id, sp.is_public,
+                   (SELECT COUNT(*) FROM {SCHEMA}.vm_stickers WHERE pack_id=sp.id) as cnt,
+                   (SELECT 1 FROM {SCHEMA}.vm_user_sticker_packs usp WHERE usp.pack_id=sp.id AND usp.user_id=%s LIMIT 1) as has
+            FROM {SCHEMA}.vm_sticker_packs sp
+            WHERE sp.is_public=TRUE OR sp.owner_id=%s
+            ORDER BY sp.created_at DESC
+        """, (user_id, user_id))
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        packs = [{"id": r[0], "name": r[1], "cover_url": r[2], "owner_id": r[3], "is_public": bool(r[4]), "sticker_count": int(r[5] or 0), "has": bool(r[6])} for r in rows]
+        return resp(200, {"ok": True, "packs": packs})
+
+    if action == "get_my_packs":
+        cur.execute(f"""
+            SELECT sp.id, sp.name, sp.cover_url, sp.owner_id, sp.is_public,
+                   (SELECT COUNT(*) FROM {SCHEMA}.vm_stickers WHERE pack_id=sp.id) as cnt
+            FROM {SCHEMA}.vm_sticker_packs sp
+            JOIN {SCHEMA}.vm_user_sticker_packs usp ON usp.pack_id=sp.id AND usp.user_id=%s
+            ORDER BY sp.name
+        """, (user_id,))
+        rows = cur.fetchall()
+        # Стикеры для каждого пака
+        packs = []
+        for r in rows:
+            cur.execute(f"SELECT id, image_url, emoji, position FROM {SCHEMA}.vm_stickers WHERE pack_id=%s ORDER BY position, id", (r[0],))
+            stickers = [{"id": s[0], "image_url": s[1], "emoji": s[2], "position": s[3]} for s in cur.fetchall()]
+            packs.append({"id": r[0], "name": r[1], "cover_url": r[2], "owner_id": r[3], "is_public": bool(r[4]), "sticker_count": int(r[5] or 0), "stickers": stickers})
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "packs": packs})
+
+    if action == "create_pack":
+        name = (body.get("name") or "").strip()
+        is_public = bool(body.get("is_public", False))
+        if not name or len(name) < 2:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Название пака минимум 2 символа"})
+        cover_url = None
+        if body.get("cover_data"):
+            cover_url = upload_to_s3(body["cover_data"], body.get("cover_mime", "image/png"), "stickers")
+        cur.execute(f"INSERT INTO {SCHEMA}.vm_sticker_packs (owner_id, name, cover_url, is_public) VALUES (%s, %s, %s, %s) RETURNING id", (user_id, name, cover_url, is_public))
+        pack_id = cur.fetchone()[0]
+        cur.execute(f"INSERT INTO {SCHEMA}.vm_user_sticker_packs (user_id, pack_id) VALUES (%s, %s)", (user_id, pack_id))
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "pack_id": pack_id})
+
+    if action == "add_sticker":
+        pack_id = body.get("pack_id")
+        data_b64 = body.get("data")
+        emoji_tag = (body.get("emoji") or "").strip()
+        if not pack_id or not data_b64:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен pack_id и data"})
+        cur.execute(f"SELECT owner_id FROM {SCHEMA}.vm_sticker_packs WHERE id=%s", (pack_id,))
+        pack_row = cur.fetchone()
+        if not pack_row or pack_row[0] != user_id:
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нет прав на этот пак"})
+        image_url = upload_to_s3(data_b64, body.get("mime_type", "image/png"), "stickers")
+        cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.vm_stickers WHERE pack_id=%s", (pack_id,))
+        pos = cur.fetchone()[0]
+        cur.execute(f"INSERT INTO {SCHEMA}.vm_stickers (pack_id, image_url, emoji, position) VALUES (%s, %s, %s, %s) RETURNING id", (pack_id, image_url, emoji_tag, pos))
+        sticker_id = cur.fetchone()[0]
+        # Первый стикер — обложка пака
+        if pos == 0:
+            cur.execute(f"UPDATE {SCHEMA}.vm_sticker_packs SET cover_url=%s WHERE id=%s", (image_url, pack_id))
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "sticker_id": sticker_id, "image_url": image_url})
+
+    if action == "add_pack":
+        pack_id = body.get("pack_id")
+        if not pack_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен pack_id"})
+        cur.execute(f"SELECT id FROM {SCHEMA}.vm_sticker_packs WHERE id=%s AND is_public=TRUE", (pack_id,))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return resp(404, {"error": "Пак не найден"})
+        cur.execute(f"INSERT INTO {SCHEMA}.vm_user_sticker_packs (user_id, pack_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (user_id, pack_id))
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
+
+    if action == "remove_pack":
+        pack_id = body.get("pack_id")
+        if not pack_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен pack_id"})
+        cur.execute(f"UPDATE {SCHEMA}.vm_user_sticker_packs SET user_id=user_id WHERE user_id=%s AND pack_id=%s", (user_id, pack_id))
+        cur.execute(f"DELETE FROM {SCHEMA}.vm_user_sticker_packs WHERE user_id=%s AND pack_id=%s", (user_id, pack_id))
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
+
+    if action == "send_sticker":
+        chat_id = body.get("chat_id")
+        sticker_id = body.get("sticker_id")
+        if not chat_id or not sticker_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен chat_id и sticker_id"})
+        cur.execute(f"SELECT 1 FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нет доступа"})
+        cur.execute(f"SELECT image_url, emoji FROM {SCHEMA}.vm_stickers WHERE id=%s", (sticker_id,))
+        sticker_row = cur.fetchone()
+        if not sticker_row:
+            cur.close(); conn.close()
+            return resp(404, {"error": "Стикер не найден"})
+        image_url, emoji_tag = sticker_row
+        text = f"sticker:{sticker_id}"
+        cur.execute(f"INSERT INTO {SCHEMA}.vm_messages (chat_id, sender_id, msg_text, msg_type, msg_status, media_url) VALUES (%s, %s, %s, 'sticker', 'sent', %s) RETURNING id, created_at", (chat_id, user_id, text, image_url))
+        row = cur.fetchone()
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "message": {"id": row[0], "time": row[1].strftime("%H:%M"), "text": text, "type": "sticker", "status": "sent", "out": True, "media_url": image_url}})
+
     cur.close(); conn.close()
     return resp(404, {"error": "Unknown action"})

@@ -102,11 +102,11 @@ async function call(baseUrl: string, action: string, method = "GET", body?: obje
 
 // Auth
 export const authApi = {
-  register: (username: string, display_name: string, password: string) =>
-    call(AUTH_URL, "register", "POST", { username, display_name, password }, null),
+  register: (phone: string, display_name: string, password: string, username?: string) =>
+    call(AUTH_URL, "register", "POST", { phone, display_name, password, username }, null),
 
-  login: (username: string, password: string) =>
-    call(AUTH_URL, "login", "POST", { username, password }, null),
+  login: (phone: string, password: string) =>
+    call(AUTH_URL, "login", "POST", { phone, password }, null),
 
   me: () => call(AUTH_URL, "me", "GET"),
 
@@ -114,6 +114,9 @@ export const authApi = {
 
   sessions: () => call(AUTH_URL, "sessions", "GET"),
   logoutOther: () => call(AUTH_URL, "logout_other", "POST"),
+
+  changeUsername: (username: string) =>
+    call(AUTH_URL, "change_username", "POST", { username }),
 };
 
 // Chats
@@ -176,6 +179,26 @@ export const chatsApi = {
 
   kickMember: (chat_id: number, user_id: number) =>
     call(CHATS_URL, "kick_member", "POST", { chat_id, user_id }),
+
+  deleteMessage: (message_id: number) =>
+    call(CHATS_URL, "delete_message", "POST", { message_id }),
+
+  toggleReaction: (message_id: number, emoji: string) =>
+    call(CHATS_URL, "toggle_reaction", "POST", { message_id, emoji }),
+
+  getReactions: (chat_id: number) =>
+    call(CHATS_URL, "get_reactions", "GET", undefined, undefined, { chat_id: String(chat_id) }),
+
+  getMyPacks: () => call(CHATS_URL, "get_my_packs", "GET"),
+  getStickerPacks: () => call(CHATS_URL, "get_sticker_packs", "GET"),
+  createPack: (name: string, is_public: boolean) =>
+    call(CHATS_URL, "create_pack", "POST", { name, is_public }),
+  addSticker: (pack_id: number, data: string, mime_type: string, emoji: string) =>
+    call(CHATS_URL, "add_sticker", "POST", { pack_id, data, mime_type, emoji }),
+  sendSticker: (chat_id: number, sticker_id: number) =>
+    call(CHATS_URL, "send_sticker", "POST", { chat_id, sticker_id }),
+  addPack: (pack_id: number) => call(CHATS_URL, "add_pack", "POST", { pack_id }),
+  removePack: (pack_id: number) => call(CHATS_URL, "remove_pack", "POST", { pack_id }),
 };
 
 // Users
