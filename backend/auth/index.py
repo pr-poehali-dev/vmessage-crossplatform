@@ -220,7 +220,8 @@ def handler(event: dict, context) -> dict:
         cur.execute(
             f"""SELECT id FROM {SCHEMA}.vm_phone_codes
                 WHERE email=%s AND code=%s AND purpose='register'
-                  AND used=FALSE AND expires_at > NOW()
+                  AND used=FALSE
+                  AND created_at > NOW() - INTERVAL '15 minutes'
                 ORDER BY created_at DESC LIMIT 1""",
             (email, code)
         )
@@ -302,18 +303,19 @@ def handler(event: dict, context) -> dict:
         row = cur.fetchone()
         if not row:
             cur.close(); conn.close()
-            return resp(401, {"error": "Аккаунт с таким номером не найден"})
+            return resp(400, {"error": "Аккаунт с таким номером не найден"})
 
         # Проверяем email
         if (row[7] or "").lower() != email:
             cur.close(); conn.close()
-            return resp(401, {"error": "Неверный email для этого аккаунта"})
+            return resp(400, {"error": "Неверный email для этого аккаунта"})
 
-        # Проверяем OTP
+        # Проверяем OTP (expires_at хранится в UTC, сравниваем с NOW() AT TIME ZONE 'UTC')
         cur.execute(
             f"""SELECT id FROM {SCHEMA}.vm_phone_codes
                 WHERE email=%s AND code=%s AND purpose='login'
-                  AND used=FALSE AND expires_at > NOW()
+                  AND used=FALSE
+                  AND created_at > NOW() - INTERVAL '15 minutes'
                 ORDER BY created_at DESC LIMIT 1""",
             (email, code)
         )
@@ -455,6 +457,73 @@ def handler(event: dict, context) -> dict:
             conn.rollback()
             cur.close(); conn.close()
             return resp(409, {"error": "Этот username уже занят"})
+
+    # ── change_email ──────────────────────────────────────────────────────────
+    if action == "change_email":
+        if not token_header:
+            return resp(401, {"error": "Не авторизован"})
+        new_email = (body.get("email") or "").strip().lower()
+        code = (body.get("code") or "").strip()
+        if not new_email or not validate_email(new_email):
+            return resp(400, {"error": "Укажите корректный email"})
+        if not code:
+            return resp(400, {"error": "Введите код подтверждения"})
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(f"SELECT user_id FROM {SCHEMA}.vm_sessions WHERE token=%s", (token_header,))
+        row = cur.fetchone()
+        if not row:
+            cur.close(); conn.close()
+            return resp(401, {"error": "Сессия недействительна"})
+        user_id = row[0]
+        # Проверяем OTP (используем purpose='register' т.к. тот же код)
+        cur.execute(
+            f"""SELECT id FROM {SCHEMA}.vm_phone_codes
+                WHERE email=%s AND code=%s AND used=FALSE
+                  AND created_at > NOW() - INTERVAL '15 minutes'
+                ORDER BY created_at DESC LIMIT 1""",
+            (new_email, code)
+        )
+        otp = cur.fetchone()
+        if not otp:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Неверный или устаревший код"})
+        cur.execute(f"SELECT id FROM {SCHEMA}.vm_users WHERE email=%s AND id != %s", (new_email, user_id))
+        if cur.fetchone():
+            cur.close(); conn.close()
+            return resp(409, {"error": "Этот email уже используется"})
+        cur.execute(f"UPDATE {SCHEMA}.vm_users SET email=%s WHERE id=%s", (new_email, user_id))
+        cur.execute(f"UPDATE {SCHEMA}.vm_phone_codes SET used=TRUE WHERE id=%s", (otp[0],))
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "email": new_email})
+
+    # ── change_phone ──────────────────────────────────────────────────────────
+    if action == "change_phone":
+        if not token_header:
+            return resp(401, {"error": "Не авторизован"})
+        phone_raw = (body.get("phone") or "").strip()
+        if not phone_raw:
+            return resp(400, {"error": "Укажите номер телефона"})
+        phone = normalize_phone(phone_raw)
+        if len(phone) < 8:
+            return resp(400, {"error": "Некорректный номер телефона"})
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(f"SELECT user_id FROM {SCHEMA}.vm_sessions WHERE token=%s", (token_header,))
+        row = cur.fetchone()
+        if not row:
+            cur.close(); conn.close()
+            return resp(401, {"error": "Сессия недействительна"})
+        user_id = row[0]
+        cur.execute(f"SELECT id FROM {SCHEMA}.vm_users WHERE phone=%s AND id != %s", (phone, user_id))
+        if cur.fetchone():
+            cur.close(); conn.close()
+            return resp(409, {"error": "Этот номер уже используется"})
+        cur.execute(f"UPDATE {SCHEMA}.vm_users SET phone=%s WHERE id=%s", (phone, user_id))
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "phone": phone})
 
     # ── delete_account ────────────────────────────────────────────────────────
     if action == "delete_account":

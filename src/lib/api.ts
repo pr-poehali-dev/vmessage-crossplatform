@@ -38,6 +38,7 @@ export interface User {
   avatar_color: string;
   bio?: string;
   email?: string;
+  phone?: string;
   online?: boolean;
   avatar_url?: string;
   status?: "online" | "offline" | "inactive";
@@ -124,6 +125,12 @@ export const authApi = {
 
   changeUsername: (username: string) =>
     call(AUTH_URL, "change_username", "POST", { username }),
+
+  changeEmail: (email: string, code: string) =>
+    call(AUTH_URL, "change_email", "POST", { email, code }),
+
+  changePhone: (phone: string) =>
+    call(AUTH_URL, "change_phone", "POST", { phone }),
 
   deleteAccount: (password: string) =>
     call(AUTH_URL, "delete_account", "POST", { password }),

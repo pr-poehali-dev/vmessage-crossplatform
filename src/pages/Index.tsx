@@ -2133,24 +2133,31 @@ function ContactsSection({ me, onStartChat, onOpenProfile }: {
           </div>
         )}
         {showGlobal && (
-          <div className="px-1 py-1 text-xs font-semibold text-muted-foreground">Результаты поиска</div>
+          <div className="px-1 py-1 text-xs font-semibold text-muted-foreground">Результаты поиска — нажми чтобы написать</div>
         )}
         {displayList.map((c, i) => {
           const uStatus = c.status || (c.online ? "online" : "offline");
           return (
             <div key={c.id} className={`flex items-center gap-3 p-3 rounded-2xl hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-all cursor-pointer animate-fade-in stagger-${Math.min(i + 1, 5)}`}
-              onClick={() => onOpenProfile(c)}>
+              onClick={() => showGlobal ? onStartChat(c.username) : onOpenProfile(c)}>
               <Avatar label={c.display_name} color={c.avatar_color} status={uStatus} src={c.avatar_url} />
               <div className="flex-1 min-w-0">
                 <div className="font-semibold text-sm truncate">{c.display_name}</div>
                 <div className={`text-xs ${uStatus === "online" ? "text-emerald-500" : "text-muted-foreground"}`}>
-                  {statusLabel(uStatus)}
+                  {showGlobal ? `@${c.username}` : statusLabel(uStatus)}
                 </div>
               </div>
-              <button onClick={e => { e.stopPropagation(); onStartChat(c.username); }}
-                className="p-2 rounded-xl hover:bg-secondary text-muted-foreground hover:text-violet-500 transition-colors">
-                <Icon name="MessageCircle" size={16} />
-              </button>
+              {showGlobal ? (
+                <div className="px-2.5 py-1 rounded-xl vm-gradient-bg text-white text-xs font-medium flex items-center gap-1 flex-shrink-0">
+                  <Icon name="MessageCircle" size={12} />
+                  Написать
+                </div>
+              ) : (
+                <button onClick={e => { e.stopPropagation(); onStartChat(c.username); }}
+                  className="p-2 rounded-xl hover:bg-secondary text-muted-foreground hover:text-violet-500 transition-colors">
+                  <Icon name="MessageCircle" size={16} />
+                </button>
+              )}
             </div>
           );
         })}
@@ -2178,6 +2185,11 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
   const [emailLoading, setEmailLoading] = useState(false);
   const [emailError, setEmailError] = useState("");
   const [emailCooldown, setEmailCooldown] = useState(0);
+  // Смена телефона
+  const [showChangePhone, setShowChangePhone] = useState(false);
+  const [newPhone, setNewPhone] = useState("");
+  const [phoneLoading, setPhoneLoading] = useState(false);
+  const [phoneError, setPhoneError] = useState("");
   // Удаление аккаунта
   const [showDeleteAccount, setShowDeleteAccount] = useState(false);
   const [deletePassword, setDeletePassword] = useState("");
@@ -2217,7 +2229,7 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
   const sendEmailCode = async () => {
     setEmailError("");
     setEmailLoading(true);
-    const res = await authApi.sendCode(newEmail.trim(), "change_email");
+    const res = await authApi.sendCode(newEmail.trim(), "register");
     if (res.ok) { setEmailStep(2); setEmailCooldown(60); }
     else setEmailError(res.error || "Ошибка отправки кода");
     setEmailLoading(false);
@@ -2233,6 +2245,19 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
       setNewEmail(""); setEmailCode(""); setEmailStep(1);
     } else setEmailError(res.error || "Ошибка");
     setEmailLoading(false);
+  };
+
+  const savePhone = async () => {
+    setPhoneError("");
+    const digits = newPhone.replace(/\D/g, "");
+    if (digits.length < 7) { setPhoneError("Введите корректный номер телефона"); return; }
+    setPhoneLoading(true);
+    const res = await authApi.changePhone("+" + digits);
+    if (res.ok) {
+      onUpdate({ ...me, phone: res.phone });
+      setShowChangePhone(false); setNewPhone("");
+    } else setPhoneError(res.error || "Ошибка");
+    setPhoneLoading(false);
   };
 
   const confirmDeleteAccount = async () => {
@@ -2367,6 +2392,20 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
             </div>
           </div>
         ))}
+        {/* Телефон — отображение + кнопка смены */}
+        <div>
+          <label className="text-xs text-muted-foreground mb-1 block">Номер телефона</label>
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Icon name="Phone" size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <div className="bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm text-foreground/80">{me.phone || "—"}</div>
+            </div>
+            <button onClick={() => { setShowChangePhone(v => !v); setShowChangeEmail(false); setPhoneError(""); setNewPhone(""); }}
+              className="px-3 py-2 rounded-xl text-xs font-medium bg-secondary hover:bg-violet-50 dark:hover:bg-violet-900/30 transition-colors whitespace-nowrap">
+              Сменить
+            </button>
+          </div>
+        </div>
         {/* Email — отображение + кнопка смены */}
         <div>
           <label className="text-xs text-muted-foreground mb-1 block">Email</label>
@@ -2375,12 +2414,34 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
               <Icon name="Mail" size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
               <div className="bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm text-foreground/80">{me.email || "—"}</div>
             </div>
-            <button onClick={() => setShowChangeEmail(v => !v)} className="px-3 py-2 rounded-xl text-xs font-medium bg-secondary hover:bg-violet-50 dark:hover:bg-violet-900/30 transition-colors whitespace-nowrap">
+            <button onClick={() => { setShowChangeEmail(v => !v); setShowChangePhone(false); setEmailError(""); setEmailStep(1); setNewEmail(""); setEmailCode(""); }}
+              className="px-3 py-2 rounded-xl text-xs font-medium bg-secondary hover:bg-violet-50 dark:hover:bg-violet-900/30 transition-colors whitespace-nowrap">
               Сменить
             </button>
           </div>
         </div>
       </div>
+
+      {/* Смена телефона */}
+      {showChangePhone && (
+        <div className="mx-4 mt-3 bg-card rounded-3xl p-4 space-y-3 flex-shrink-0 border border-violet-500/30">
+          <div className="flex items-center justify-between">
+            <span className="font-semibold text-sm">Новый номер телефона</span>
+            <button onClick={() => { setShowChangePhone(false); setNewPhone(""); setPhoneError(""); }} className="p-1 rounded-lg hover:bg-secondary">
+              <Icon name="X" size={16} className="text-muted-foreground" />
+            </button>
+          </div>
+          <div className="relative">
+            <Icon name="Phone" size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <input value={newPhone} onChange={e => setNewPhone(e.target.value)} placeholder="+7 999 123-45-67" type="tel"
+              className="w-full bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-violet-400/40" />
+          </div>
+          {phoneError && <p className="text-xs text-red-400">{phoneError}</p>}
+          <button onClick={savePhone} disabled={phoneLoading || !newPhone.trim()} className="w-full py-2.5 rounded-xl text-sm font-semibold vm-gradient-bg text-white disabled:opacity-60">
+            {phoneLoading ? "Сохраняем..." : "Сохранить номер"}
+          </button>
+        </div>
+      )}
 
       {/* Смена email */}
       {showChangeEmail && (
@@ -2491,6 +2552,7 @@ function StickerPacksManager() {
   const [createName, setCreateName] = useState("");
   const [isPublic, setIsPublic] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState("");
   const [expandedPack, setExpandedPack] = useState<number|null>(null);
   const [addingSticker, setAddingSticker] = useState<number|null>(null);
   const [stickerEmoji, setStickerEmoji] = useState("");
@@ -2498,8 +2560,10 @@ function StickerPacksManager() {
 
   const load = async () => {
     setLoading(true);
-    const res = await chatsApi.getMyPacks();
-    if (res.ok) setPacks(res.packs || []);
+    try {
+      const res = await chatsApi.getMyPacks();
+      if (res.ok) setPacks(res.packs || []);
+    } catch { /* ignore */ }
     setLoading(false);
   };
 
@@ -2508,8 +2572,20 @@ function StickerPacksManager() {
   const createPack = async () => {
     if (!createName.trim()) return;
     setCreating(true);
-    const res = await chatsApi.createPack(createName.trim(), isPublic);
-    if (res.ok) { await load(); setShowCreate(false); setCreateName(""); setIsPublic(false); }
+    setCreateError("");
+    try {
+      const res = await chatsApi.createPack(createName.trim(), isPublic);
+      if (res.ok) {
+        await load();
+        setShowCreate(false);
+        setCreateName("");
+        setIsPublic(false);
+      } else {
+        setCreateError(res.error || "Не удалось создать пак");
+      }
+    } catch {
+      setCreateError("Ошибка соединения");
+    }
     setCreating(false);
   };
 
@@ -2544,6 +2620,7 @@ function StickerPacksManager() {
             <input type="checkbox" checked={isPublic} onChange={e => setIsPublic(e.target.checked)} className="accent-violet-500" />
             Публичный (виден всем)
           </label>
+          {createError && <p className="text-xs text-red-400">{createError}</p>}
           <button onClick={createPack} disabled={creating || !createName.trim()}
             className="w-full py-2 rounded-xl text-sm font-medium vm-gradient-bg text-white disabled:opacity-60">
             {creating ? "Создание..." : "Создать пак"}
@@ -2812,13 +2889,19 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
             if (!m.out && notifEnabledRef.current) {
               try {
                 if (Notification.permission === "granted") {
-                  const notif = new Notification(`V-message: ${chat.name}`, {
-                    body: m.type === "voice" ? "🎤 Голосовое сообщение" : m.type === "video_note" ? "⭕ Видеосообщение" : (m.text || "Новое сообщение"),
-                    icon: "/favicon.ico",
-                    silent: false,
-                    tag: `msg-${m.id}`,
-                  });
-                  setTimeout(() => notif.close(), 4000);
+                  const body = m.type === "voice" ? "🎤 Голосовое сообщение" : m.type === "video_note" ? "⭕ Видеосообщение" : (m.text || "Новое сообщение");
+                  const opts: NotificationOptions = { body, icon: "/favicon.svg", badge: "/favicon.svg", tag: `msg-${m.id}`, renotify: true };
+                  // Используем ServiceWorker для показа плашки (надёжнее чем new Notification)
+                  if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+                    navigator.serviceWorker.ready.then(reg => {
+                      reg.showNotification(`V-message: ${chat.name}`, opts).catch(() => {
+                        new Notification(`V-message: ${chat.name}`, opts);
+                      });
+                    }).catch(() => {});
+                  } else {
+                    const notif = new Notification(`V-message: ${chat.name}`, opts);
+                    setTimeout(() => notif.close(), 5000);
+                  }
                 }
               } catch (_e) { void _e; }
               try {
