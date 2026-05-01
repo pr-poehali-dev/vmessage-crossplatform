@@ -103,14 +103,17 @@ async function call(baseUrl: string, action: string, method = "GET", body?: obje
 
 // Auth
 export const authApi = {
-  sendCode: (email: string, purpose: "register" | "change_email") =>
-    call(AUTH_URL, "send_code", "POST", { email, purpose }, null),
+  // Отправить OTP на email (phone нужен только при регистрации для проверки)
+  sendCode: (email: string, purpose: "register" | "login", phone?: string) =>
+    call(AUTH_URL, "send_code", "POST", { email, purpose, phone }, null),
 
-  register: (email: string, code: string, display_name: string, password: string, username?: string) =>
-    call(AUTH_URL, "register", "POST", { email, code, display_name, password, username }, null),
+  // Регистрация: телефон + email + OTP + имя + пароль
+  register: (phone: string, email: string, code: string, display_name: string, password: string) =>
+    call(AUTH_URL, "register", "POST", { phone, email, code, display_name, password }, null),
 
-  login: (email: string, password: string) =>
-    call(AUTH_URL, "login", "POST", { email, password }, null),
+  // Вход: телефон + email + OTP (без пароля)
+  login: (phone: string, email: string, code: string) =>
+    call(AUTH_URL, "login", "POST", { phone, email, code }, null),
 
   me: () => call(AUTH_URL, "me", "GET"),
 
@@ -121,9 +124,6 @@ export const authApi = {
 
   changeUsername: (username: string) =>
     call(AUTH_URL, "change_username", "POST", { username }),
-
-  changeEmail: (email: string, code: string) =>
-    call(AUTH_URL, "change_email", "POST", { email, code }),
 
   deleteAccount: (password: string) =>
     call(AUTH_URL, "delete_account", "POST", { password }),

@@ -174,7 +174,9 @@ function Avatar({ label, color, size = 42, status, src }: {
 // ─── Auth Screen ─────────────────────────────────────────────────────────────
 function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void }) {
   const [tab, setTab] = useState<"login" | "register">("login");
-  const [regStep, setRegStep] = useState<1 | 2>(1);
+  // Шаги: 1 = ввод телефона+email, 2 = ввод кода (+ данные для регистрации)
+  const [step, setStep] = useState<1 | 2>(1);
+  const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -189,52 +191,38 @@ function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void })
     return () => clearTimeout(t);
   }, [cooldown]);
 
+  const reset = (newTab: "login" | "register") => {
+    setTab(newTab); setStep(1); setCode(""); setError("");
+  };
+
   const sendCode = async () => {
-    setError("");
-    setLoading(true);
+    setError(""); setLoading(true);
     try {
-      const res = await authApi.sendCode(email.trim(), "register");
-      if (res.ok) { setRegStep(2); setCooldown(60); }
+      const purpose = tab === "register" ? "register" : "login";
+      const res = await authApi.sendCode(email.trim(), purpose, phone.trim() || undefined);
+      if (res.ok) { setStep(2); setCooldown(60); }
       else setError(res.error || "Ошибка отправки кода");
     } catch { setError("Нет соединения с сервером"); }
     finally { setLoading(false); }
   };
 
-  const resendCode = async () => {
-    if (cooldown > 0) return;
-    setError("");
-    setLoading(true);
+  const submit = async () => {
+    setError(""); setLoading(true);
     try {
-      const res = await authApi.sendCode(email.trim(), "register");
-      if (res.ok) setCooldown(60);
-      else setError(res.error || "Ошибка");
-    } catch { setError("Нет соединения"); }
-    finally { setLoading(false); }
-  };
-
-  const submitRegister = async () => {
-    setError("");
-    setLoading(true);
-    try {
-      const res = await authApi.register(email.trim(), code.trim(), displayName.trim(), password);
+      let res;
+      if (tab === "register") {
+        res = await authApi.register(phone.trim(), email.trim(), code.trim(), displayName.trim(), password);
+      } else {
+        res = await authApi.login(phone.trim(), email.trim(), code.trim());
+      }
       if (res.ok) { saveSession(res.token, res.user); onAuth(res.token, res.user); }
       else setError(res.error || "Ошибка");
     } catch { setError("Нет соединения с сервером"); }
     finally { setLoading(false); }
   };
 
-  const submitLogin = async () => {
-    setError("");
-    setLoading(true);
-    try {
-      const res = await authApi.login(email.trim(), password);
-      if (res.ok) { saveSession(res.token, res.user); onAuth(res.token, res.user); }
-      else setError(res.error || "Неверный email или пароль");
-    } catch { setError("Нет соединения с сервером"); }
-    finally { setLoading(false); }
-  };
-
-  const inputCls = "w-full bg-secondary rounded-xl pl-9 pr-4 py-3 text-sm outline-none focus:ring-2 focus:ring-violet-400/40 transition-all";
+  const ic = "w-full bg-secondary rounded-xl pl-9 pr-4 py-3 text-sm outline-none focus:ring-2 focus:ring-violet-400/40 transition-all";
+  const errEl = error ? <div className="bg-red-50 dark:bg-red-900/20 text-red-500 text-sm px-4 py-2.5 rounded-xl flex items-center gap-2"><Icon name="AlertCircle" size={15} />{error}</div> : null;
 
   return (
     <div className="flex items-center justify-center vm-chat-bg p-4" style={{ height: "100dvh" }}>
@@ -248,86 +236,90 @@ function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void })
         </div>
 
         <div className="bg-card rounded-3xl shadow-xl p-6 space-y-4">
-          {/* Табы */}
           <div className="flex bg-secondary rounded-2xl p-1">
             {(["login", "register"] as const).map(t => (
-              <button key={t} onClick={() => { setTab(t); setError(""); setRegStep(1); setCode(""); }}
+              <button key={t} onClick={() => reset(t)}
                 className={`flex-1 py-2 rounded-xl text-sm font-semibold transition-all duration-200 ${tab === t ? "vm-gradient-bg text-white shadow-md" : "text-muted-foreground"}`}>
                 {t === "login" ? "Войти" : "Регистрация"}
               </button>
             ))}
           </div>
 
-          {/* ── ВХОД ── */}
-          {tab === "login" && (
+          {/* ── ШАГ 1: телефон + email ── */}
+          {step === 1 && (
             <div className="space-y-3">
+              <p className="text-sm text-muted-foreground text-center">
+                {tab === "register" ? "Введи номер телефона и email — пришлём код" : "Введи номер телефона и email для входа"}
+              </p>
               <div className="relative">
-                <Icon name="Mail" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email адрес"
-                  type="email" className={inputCls} onKeyDown={e => e.key === "Enter" && submitLogin()} />
+                <Icon name="Phone" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+7 999 123-45-67"
+                  type="tel" className={ic} />
               </div>
-              <div className="relative">
-                <Icon name="Lock" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                <input type="password" value={password} onChange={e => setPassword(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && submitLogin()}
-                  placeholder="Пароль" className={inputCls} />
-              </div>
-              {error && <div className="bg-red-50 dark:bg-red-900/20 text-red-500 text-sm px-4 py-2.5 rounded-xl flex items-center gap-2"><Icon name="AlertCircle" size={15} />{error}</div>}
-              <button onClick={submitLogin} disabled={loading} className="w-full vm-gradient-bg text-white font-semibold py-3 rounded-xl hover:opacity-90 transition-opacity active:scale-95 shadow-lg shadow-violet-500/30 disabled:opacity-60">
-                {loading ? "Загрузка..." : "Войти"}
-              </button>
-            </div>
-          )}
-
-          {/* ── РЕГИСТРАЦИЯ — шаг 1: email ── */}
-          {tab === "register" && regStep === 1 && (
-            <div className="space-y-3">
-              <p className="text-sm text-muted-foreground text-center">Введи email — пришлём код подтверждения</p>
               <div className="relative">
                 <Icon name="Mail" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
                 <input value={email} onChange={e => setEmail(e.target.value)} placeholder="email@example.com"
-                  type="email" className={inputCls} onKeyDown={e => e.key === "Enter" && sendCode()} />
+                  type="email" className={ic} onKeyDown={e => e.key === "Enter" && sendCode()} />
               </div>
-              {error && <div className="bg-red-50 dark:bg-red-900/20 text-red-500 text-sm px-4 py-2.5 rounded-xl flex items-center gap-2"><Icon name="AlertCircle" size={15} />{error}</div>}
-              <button onClick={sendCode} disabled={loading || !email.trim()} className="w-full vm-gradient-bg text-white font-semibold py-3 rounded-xl hover:opacity-90 transition-opacity active:scale-95 shadow-lg shadow-violet-500/30 disabled:opacity-60">
-                {loading ? "Отправляем..." : "Получить код"}
+              {errEl}
+              <button onClick={sendCode} disabled={loading || !phone.trim() || !email.trim()}
+                className="w-full vm-gradient-bg text-white font-semibold py-3 rounded-xl hover:opacity-90 active:scale-95 shadow-lg shadow-violet-500/30 disabled:opacity-60 transition-all">
+                {loading ? "Отправляем код..." : "Получить код на email"}
               </button>
             </div>
           )}
 
-          {/* ── РЕГИСТРАЦИЯ — шаг 2: код + данные ── */}
-          {tab === "register" && regStep === 2 && (
+          {/* ── ШАГ 2: код (+ данные при регистрации) ── */}
+          {step === 2 && (
             <div className="space-y-3">
               <div className="bg-violet-50 dark:bg-violet-900/20 rounded-xl px-4 py-3 flex items-center justify-between">
                 <div>
                   <p className="text-xs text-muted-foreground">Код отправлен на</p>
                   <p className="text-sm font-semibold">{email}</p>
                 </div>
-                <button onClick={() => { setRegStep(1); setCode(""); setError(""); }} className="text-xs text-violet-500 hover:underline">Изменить</button>
+                <button onClick={() => { setStep(1); setCode(""); setError(""); }} className="text-xs text-violet-500 hover:underline">Изменить</button>
               </div>
+
               <div className="relative">
                 <Icon name="ShieldCheck" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
                 <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
                   placeholder="Код из письма (6 цифр)" inputMode="numeric" maxLength={6}
-                  className={inputCls + " tracking-widest text-center text-lg font-bold"} />
+                  className={ic + " tracking-widest text-center text-lg font-bold"} />
               </div>
-              <div className="relative">
-                <Icon name="User" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                <input value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="Ваше имя" className={inputCls} />
-              </div>
-              <div className="relative">
-                <Icon name="Lock" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                <input type="password" value={password} onChange={e => setPassword(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && submitRegister()}
-                  placeholder="Придумайте пароль (мин. 6 символов)" className={inputCls} />
-              </div>
-              {error && <div className="bg-red-50 dark:bg-red-900/20 text-red-500 text-sm px-4 py-2.5 rounded-xl flex items-center gap-2"><Icon name="AlertCircle" size={15} />{error}</div>}
-              <button onClick={submitRegister} disabled={loading || code.length < 6 || !displayName.trim() || password.length < 6}
-                className="w-full vm-gradient-bg text-white font-semibold py-3 rounded-xl hover:opacity-90 transition-opacity active:scale-95 shadow-lg shadow-violet-500/30 disabled:opacity-60">
-                {loading ? "Создаём аккаунт..." : "Создать аккаунт"}
+
+              {tab === "register" && (
+                <>
+                  <div className="relative">
+                    <Icon name="User" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                    <input value={displayName} onChange={e => setDisplayName(e.target.value)}
+                      placeholder="Ваше имя" className={ic} />
+                  </div>
+                  <div className="relative">
+                    <Icon name="Lock" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                    <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && submit()}
+                      placeholder="Придумайте пароль (мин. 6 символов)" className={ic} />
+                  </div>
+                </>
+              )}
+
+              {errEl}
+
+              <button onClick={submit}
+                disabled={loading || code.length < 6 || (tab === "register" && (!displayName.trim() || password.length < 6))}
+                className="w-full vm-gradient-bg text-white font-semibold py-3 rounded-xl hover:opacity-90 active:scale-95 shadow-lg shadow-violet-500/30 disabled:opacity-60 transition-all">
+                {loading ? (tab === "register" ? "Создаём аккаунт..." : "Входим...") : (tab === "register" ? "Создать аккаунт" : "Войти")}
               </button>
-              <button onClick={resendCode} disabled={cooldown > 0 || loading} className="w-full text-sm text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50">
-                {cooldown > 0 ? `Повторная отправка через ${cooldown} сек.` : "Отправить код повторно"}
+
+              <button onClick={async () => {
+                if (cooldown > 0) return;
+                const purpose = tab === "register" ? "register" : "login";
+                setLoading(true);
+                const res = await authApi.sendCode(email.trim(), purpose, phone.trim() || undefined);
+                if (res.ok) setCooldown(60); else setError(res.error || "Ошибка");
+                setLoading(false);
+              }} disabled={cooldown > 0 || loading} className="w-full text-sm text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50">
+                {cooldown > 0 ? `Отправить снова через ${cooldown} сек.` : "Отправить код повторно"}
               </button>
             </div>
           )}
