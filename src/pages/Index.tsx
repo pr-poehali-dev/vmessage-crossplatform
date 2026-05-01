@@ -174,9 +174,8 @@ function Avatar({ label, color, size = 42, status, src }: {
 // ─── Auth Screen ─────────────────────────────────────────────────────────────
 function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void }) {
   const [tab, setTab] = useState<"login" | "register">("login");
-  // Регистрация — шаг 1: телефон, шаг 2: код + данные
   const [regStep, setRegStep] = useState<1 | 2>(1);
-  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
@@ -184,7 +183,6 @@ function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void })
   const [loading, setLoading] = useState(false);
   const [cooldown, setCooldown] = useState(0);
 
-  // Обратный отсчёт кулдауна
   useEffect(() => {
     if (cooldown <= 0) return;
     const t = setTimeout(() => setCooldown(v => v - 1), 1000);
@@ -195,18 +193,11 @@ function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void })
     setError("");
     setLoading(true);
     try {
-      const res = await authApi.sendCode(phone.trim(), "register");
-      if (res.ok) {
-        setRegStep(2);
-        setCooldown(60);
-      } else {
-        setError(res.error || "Ошибка отправки кода");
-      }
-    } catch {
-      setError("Нет соединения с сервером");
-    } finally {
-      setLoading(false);
-    }
+      const res = await authApi.sendCode(email.trim(), "register");
+      if (res.ok) { setRegStep(2); setCooldown(60); }
+      else setError(res.error || "Ошибка отправки кода");
+    } catch { setError("Нет соединения с сервером"); }
+    finally { setLoading(false); }
   };
 
   const resendCode = async () => {
@@ -214,7 +205,7 @@ function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void })
     setError("");
     setLoading(true);
     try {
-      const res = await authApi.sendCode(phone.trim(), "register");
+      const res = await authApi.sendCode(email.trim(), "register");
       if (res.ok) setCooldown(60);
       else setError(res.error || "Ошибка");
     } catch { setError("Нет соединения"); }
@@ -225,7 +216,7 @@ function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void })
     setError("");
     setLoading(true);
     try {
-      const res = await authApi.register(phone.trim(), code.trim(), displayName.trim(), password);
+      const res = await authApi.register(email.trim(), code.trim(), displayName.trim(), password);
       if (res.ok) { saveSession(res.token, res.user); onAuth(res.token, res.user); }
       else setError(res.error || "Ошибка");
     } catch { setError("Нет соединения с сервером"); }
@@ -236,9 +227,9 @@ function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void })
     setError("");
     setLoading(true);
     try {
-      const res = await authApi.login(phone.trim(), password);
+      const res = await authApi.login(email.trim(), password);
       if (res.ok) { saveSession(res.token, res.user); onAuth(res.token, res.user); }
-      else setError(res.error || "Неверный номер или пароль");
+      else setError(res.error || "Неверный email или пароль");
     } catch { setError("Нет соединения с сервером"); }
     finally { setLoading(false); }
   };
@@ -271,9 +262,9 @@ function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void })
           {tab === "login" && (
             <div className="space-y-3">
               <div className="relative">
-                <Icon name="Phone" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+7 (999) 123-45-67"
-                  type="tel" className={inputCls} />
+                <Icon name="Mail" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email адрес"
+                  type="email" className={inputCls} onKeyDown={e => e.key === "Enter" && submitLogin()} />
               </div>
               <div className="relative">
                 <Icon name="Lock" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -288,17 +279,17 @@ function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void })
             </div>
           )}
 
-          {/* ── РЕГИСТРАЦИЯ — шаг 1: номер телефона ── */}
+          {/* ── РЕГИСТРАЦИЯ — шаг 1: email ── */}
           {tab === "register" && regStep === 1 && (
             <div className="space-y-3">
-              <p className="text-sm text-muted-foreground text-center">Введи номер телефона — отправим код подтверждения</p>
+              <p className="text-sm text-muted-foreground text-center">Введи email — пришлём код подтверждения</p>
               <div className="relative">
-                <Icon name="Phone" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+7 (999) 123-45-67"
-                  type="tel" className={inputCls} onKeyDown={e => e.key === "Enter" && sendCode()} />
+                <Icon name="Mail" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input value={email} onChange={e => setEmail(e.target.value)} placeholder="email@example.com"
+                  type="email" className={inputCls} onKeyDown={e => e.key === "Enter" && sendCode()} />
               </div>
               {error && <div className="bg-red-50 dark:bg-red-900/20 text-red-500 text-sm px-4 py-2.5 rounded-xl flex items-center gap-2"><Icon name="AlertCircle" size={15} />{error}</div>}
-              <button onClick={sendCode} disabled={loading || !phone.trim()} className="w-full vm-gradient-bg text-white font-semibold py-3 rounded-xl hover:opacity-90 transition-opacity active:scale-95 shadow-lg shadow-violet-500/30 disabled:opacity-60">
+              <button onClick={sendCode} disabled={loading || !email.trim()} className="w-full vm-gradient-bg text-white font-semibold py-3 rounded-xl hover:opacity-90 transition-opacity active:scale-95 shadow-lg shadow-violet-500/30 disabled:opacity-60">
                 {loading ? "Отправляем..." : "Получить код"}
               </button>
             </div>
@@ -310,14 +301,14 @@ function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void })
               <div className="bg-violet-50 dark:bg-violet-900/20 rounded-xl px-4 py-3 flex items-center justify-between">
                 <div>
                   <p className="text-xs text-muted-foreground">Код отправлен на</p>
-                  <p className="text-sm font-semibold">{phone}</p>
+                  <p className="text-sm font-semibold">{email}</p>
                 </div>
                 <button onClick={() => { setRegStep(1); setCode(""); setError(""); }} className="text-xs text-violet-500 hover:underline">Изменить</button>
               </div>
               <div className="relative">
                 <Icon name="ShieldCheck" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
                 <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                  placeholder="Код из SMS (6 цифр)" inputMode="numeric" maxLength={6}
+                  placeholder="Код из письма (6 цифр)" inputMode="numeric" maxLength={6}
                   className={inputCls + " tracking-widest text-center text-lg font-bold"} />
               </div>
               <div className="relative">
@@ -2187,14 +2178,14 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
   const [newUsername, setNewUsername] = useState("");
   const [usernameError, setUsernameError] = useState("");
   const [savingUsername, setSavingUsername] = useState(false);
-  // Смена телефона
-  const [showChangePhone, setShowChangePhone] = useState(false);
-  const [newPhone, setNewPhone] = useState("");
-  const [phoneCode, setPhoneCode] = useState("");
-  const [phoneStep, setPhoneStep] = useState<1|2>(1);
-  const [phoneLoading, setPhoneLoading] = useState(false);
-  const [phoneError, setPhoneError] = useState("");
-  const [phoneCooldown, setPhoneCooldown] = useState(0);
+  // Смена email
+  const [showChangeEmail, setShowChangeEmail] = useState(false);
+  const [newEmail, setNewEmail] = useState("");
+  const [emailCode, setEmailCode] = useState("");
+  const [emailStep, setEmailStep] = useState<1|2>(1);
+  const [emailLoading, setEmailLoading] = useState(false);
+  const [emailError, setEmailError] = useState("");
+  const [emailCooldown, setEmailCooldown] = useState(0);
   // Удаление аккаунта
   const [showDeleteAccount, setShowDeleteAccount] = useState(false);
   const [deletePassword, setDeletePassword] = useState("");
@@ -2203,10 +2194,10 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
   const avatarInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (phoneCooldown <= 0) return;
-    const t = setTimeout(() => setPhoneCooldown(v => v - 1), 1000);
+    if (emailCooldown <= 0) return;
+    const t = setTimeout(() => setEmailCooldown(v => v - 1), 1000);
     return () => clearTimeout(t);
-  }, [phoneCooldown]);
+  }, [emailCooldown]);
 
   const save = async () => {
     setSaving(true);
@@ -2231,25 +2222,25 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
     setSavingUsername(false);
   };
 
-  const sendPhoneCode = async () => {
-    setPhoneError("");
-    setPhoneLoading(true);
-    const res = await authApi.sendCode(newPhone.trim(), "change_phone");
-    if (res.ok) { setPhoneStep(2); setPhoneCooldown(60); }
-    else setPhoneError(res.error || "Ошибка отправки кода");
-    setPhoneLoading(false);
+  const sendEmailCode = async () => {
+    setEmailError("");
+    setEmailLoading(true);
+    const res = await authApi.sendCode(newEmail.trim(), "change_email");
+    if (res.ok) { setEmailStep(2); setEmailCooldown(60); }
+    else setEmailError(res.error || "Ошибка отправки кода");
+    setEmailLoading(false);
   };
 
-  const confirmPhoneChange = async () => {
-    setPhoneError("");
-    setPhoneLoading(true);
-    const res = await authApi.changePhone(newPhone.trim(), phoneCode.trim());
+  const confirmEmailChange = async () => {
+    setEmailError("");
+    setEmailLoading(true);
+    const res = await authApi.changeEmail(newEmail.trim(), emailCode.trim());
     if (res.ok) {
-      onUpdate({ ...me, phone: res.phone });
-      setShowChangePhone(false);
-      setNewPhone(""); setPhoneCode(""); setPhoneStep(1);
-    } else setPhoneError(res.error || "Ошибка");
-    setPhoneLoading(false);
+      onUpdate({ ...me, email: res.email });
+      setShowChangeEmail(false);
+      setNewEmail(""); setEmailCode(""); setEmailStep(1);
+    } else setEmailError(res.error || "Ошибка");
+    setEmailLoading(false);
   };
 
   const confirmDeleteAccount = async () => {
@@ -2384,55 +2375,55 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
             </div>
           </div>
         ))}
-        {/* Телефон — только отображение + кнопка смены */}
+        {/* Email — отображение + кнопка смены */}
         <div>
-          <label className="text-xs text-muted-foreground mb-1 block">Номер телефона</label>
+          <label className="text-xs text-muted-foreground mb-1 block">Email</label>
           <div className="flex items-center gap-2">
             <div className="relative flex-1">
-              <Icon name="Phone" size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-              <div className="bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm text-foreground/80">{me.phone || "—"}</div>
+              <Icon name="Mail" size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <div className="bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm text-foreground/80">{me.email || "—"}</div>
             </div>
-            <button onClick={() => setShowChangePhone(v => !v)} className="px-3 py-2 rounded-xl text-xs font-medium bg-secondary hover:bg-violet-50 dark:hover:bg-violet-900/30 transition-colors whitespace-nowrap">
+            <button onClick={() => setShowChangeEmail(v => !v)} className="px-3 py-2 rounded-xl text-xs font-medium bg-secondary hover:bg-violet-50 dark:hover:bg-violet-900/30 transition-colors whitespace-nowrap">
               Сменить
             </button>
           </div>
         </div>
       </div>
 
-      {/* Смена телефона */}
-      {showChangePhone && (
+      {/* Смена email */}
+      {showChangeEmail && (
         <div className="mx-4 mt-3 bg-card rounded-3xl p-4 space-y-3 flex-shrink-0 border border-violet-500/30">
           <div className="flex items-center justify-between">
-            <span className="font-semibold text-sm">Новый номер телефона</span>
-            <button onClick={() => { setShowChangePhone(false); setPhoneStep(1); setNewPhone(""); setPhoneCode(""); setPhoneError(""); }} className="p-1 rounded-lg hover:bg-secondary"><Icon name="X" size={16} className="text-muted-foreground" /></button>
+            <span className="font-semibold text-sm">Новый email</span>
+            <button onClick={() => { setShowChangeEmail(false); setEmailStep(1); setNewEmail(""); setEmailCode(""); setEmailError(""); }} className="p-1 rounded-lg hover:bg-secondary"><Icon name="X" size={16} className="text-muted-foreground" /></button>
           </div>
-          {phoneStep === 1 ? (
+          {emailStep === 1 ? (
             <>
               <div className="relative">
-                <Icon name="Phone" size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                <input value={newPhone} onChange={e => setNewPhone(e.target.value)} placeholder="+7 (999) 123-45-67" type="tel"
+                <Icon name="Mail" size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input value={newEmail} onChange={e => setNewEmail(e.target.value)} placeholder="новый@email.com" type="email"
                   className="w-full bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-violet-400/40" />
               </div>
-              {phoneError && <p className="text-xs text-red-400">{phoneError}</p>}
-              <button onClick={sendPhoneCode} disabled={phoneLoading || !newPhone.trim()} className="w-full py-2.5 rounded-xl text-sm font-semibold vm-gradient-bg text-white disabled:opacity-60">
-                {phoneLoading ? "Отправляем..." : "Получить код"}
+              {emailError && <p className="text-xs text-red-400">{emailError}</p>}
+              <button onClick={sendEmailCode} disabled={emailLoading || !newEmail.trim()} className="w-full py-2.5 rounded-xl text-sm font-semibold vm-gradient-bg text-white disabled:opacity-60">
+                {emailLoading ? "Отправляем..." : "Получить код"}
               </button>
             </>
           ) : (
             <>
-              <p className="text-xs text-muted-foreground">Код отправлен на {newPhone}</p>
+              <p className="text-xs text-muted-foreground">Код отправлен на {newEmail}</p>
               <div className="relative">
                 <Icon name="ShieldCheck" size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                <input value={phoneCode} onChange={e => setPhoneCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                  placeholder="Код из SMS" inputMode="numeric" maxLength={6}
+                <input value={emailCode} onChange={e => setEmailCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  placeholder="Код из письма" inputMode="numeric" maxLength={6}
                   className="w-full bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-violet-400/40 tracking-widest text-center font-bold" />
               </div>
-              {phoneError && <p className="text-xs text-red-400">{phoneError}</p>}
-              <button onClick={confirmPhoneChange} disabled={phoneLoading || phoneCode.length < 6} className="w-full py-2.5 rounded-xl text-sm font-semibold vm-gradient-bg text-white disabled:opacity-60">
-                {phoneLoading ? "Подтверждаем..." : "Подтвердить"}
+              {emailError && <p className="text-xs text-red-400">{emailError}</p>}
+              <button onClick={confirmEmailChange} disabled={emailLoading || emailCode.length < 6} className="w-full py-2.5 rounded-xl text-sm font-semibold vm-gradient-bg text-white disabled:opacity-60">
+                {emailLoading ? "Подтверждаем..." : "Подтвердить"}
               </button>
-              <button onClick={async () => { if (phoneCooldown > 0) return; await sendPhoneCode(); }} disabled={phoneCooldown > 0} className="w-full text-xs text-muted-foreground disabled:opacity-50">
-                {phoneCooldown > 0 ? `Повторно через ${phoneCooldown} сек.` : "Отправить снова"}
+              <button onClick={async () => { if (emailCooldown > 0) return; await sendEmailCode(); }} disabled={emailCooldown > 0} className="w-full text-xs text-muted-foreground disabled:opacity-50">
+                {emailCooldown > 0 ? `Повторно через ${emailCooldown} сек.` : "Отправить снова"}
               </button>
             </>
           )}

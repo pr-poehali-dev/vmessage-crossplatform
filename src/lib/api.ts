@@ -37,7 +37,7 @@ export interface User {
   display_name: string;
   avatar_color: string;
   bio?: string;
-  phone?: string;
+  email?: string;
   online?: boolean;
   avatar_url?: string;
   status?: "online" | "offline" | "inactive";
@@ -103,14 +103,14 @@ async function call(baseUrl: string, action: string, method = "GET", body?: obje
 
 // Auth
 export const authApi = {
-  sendCode: (phone: string, purpose: "register" | "change_phone") =>
-    call(AUTH_URL, "send_code", "POST", { phone, purpose }, null),
+  sendCode: (email: string, purpose: "register" | "change_email") =>
+    call(AUTH_URL, "send_code", "POST", { email, purpose }, null),
 
-  register: (phone: string, code: string, display_name: string, password: string, username?: string) =>
-    call(AUTH_URL, "register", "POST", { phone, code, display_name, password, username }, null),
+  register: (email: string, code: string, display_name: string, password: string, username?: string) =>
+    call(AUTH_URL, "register", "POST", { email, code, display_name, password, username }, null),
 
-  login: (phone: string, password: string) =>
-    call(AUTH_URL, "login", "POST", { phone, password }, null),
+  login: (email: string, password: string) =>
+    call(AUTH_URL, "login", "POST", { email, password }, null),
 
   me: () => call(AUTH_URL, "me", "GET"),
 
@@ -122,8 +122,8 @@ export const authApi = {
   changeUsername: (username: string) =>
     call(AUTH_URL, "change_username", "POST", { username }),
 
-  changePhone: (phone: string, code: string) =>
-    call(AUTH_URL, "change_phone", "POST", { phone, code }),
+  changeEmail: (email: string, code: string) =>
+    call(AUTH_URL, "change_email", "POST", { email, code }),
 
   deleteAccount: (password: string) =>
     call(AUTH_URL, "delete_account", "POST", { password }),
