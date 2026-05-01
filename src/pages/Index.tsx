@@ -174,27 +174,33 @@ function Avatar({ label, color, size = 42, status, src }: {
 // ─── Auth Screen ─────────────────────────────────────────────────────────────
 function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void }) {
   const [tab, setTab] = useState<"login" | "register">("login");
+  // Регистрация — шаг 1: телефон, шаг 2: код + данные
+  const [regStep, setRegStep] = useState<1 | 2>(1);
   const [phone, setPhone] = useState("");
+  const [code, setCode] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [cooldown, setCooldown] = useState(0);
 
-  const submit = async () => {
+  // Обратный отсчёт кулдауна
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown(v => v - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
+
+  const sendCode = async () => {
     setError("");
     setLoading(true);
     try {
-      let res;
-      if (tab === "login") {
-        res = await authApi.login(phone.trim(), password);
-      } else {
-        res = await authApi.register(phone.trim(), displayName.trim(), password);
-      }
+      const res = await authApi.sendCode(phone.trim(), "register");
       if (res.ok) {
-        saveSession(res.token, res.user);
-        onAuth(res.token, res.user);
+        setRegStep(2);
+        setCooldown(60);
       } else {
-        setError(res.error || "Ошибка");
+        setError(res.error || "Ошибка отправки кода");
       }
     } catch {
       setError("Нет соединения с сервером");
@@ -202,6 +208,42 @@ function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void })
       setLoading(false);
     }
   };
+
+  const resendCode = async () => {
+    if (cooldown > 0) return;
+    setError("");
+    setLoading(true);
+    try {
+      const res = await authApi.sendCode(phone.trim(), "register");
+      if (res.ok) setCooldown(60);
+      else setError(res.error || "Ошибка");
+    } catch { setError("Нет соединения"); }
+    finally { setLoading(false); }
+  };
+
+  const submitRegister = async () => {
+    setError("");
+    setLoading(true);
+    try {
+      const res = await authApi.register(phone.trim(), code.trim(), displayName.trim(), password);
+      if (res.ok) { saveSession(res.token, res.user); onAuth(res.token, res.user); }
+      else setError(res.error || "Ошибка");
+    } catch { setError("Нет соединения с сервером"); }
+    finally { setLoading(false); }
+  };
+
+  const submitLogin = async () => {
+    setError("");
+    setLoading(true);
+    try {
+      const res = await authApi.login(phone.trim(), password);
+      if (res.ok) { saveSession(res.token, res.user); onAuth(res.token, res.user); }
+      else setError(res.error || "Неверный номер или пароль");
+    } catch { setError("Нет соединения с сервером"); }
+    finally { setLoading(false); }
+  };
+
+  const inputCls = "w-full bg-secondary rounded-xl pl-9 pr-4 py-3 text-sm outline-none focus:ring-2 focus:ring-violet-400/40 transition-all";
 
   return (
     <div className="flex items-center justify-center vm-chat-bg p-4" style={{ height: "100dvh" }}>
@@ -213,49 +255,92 @@ function AuthScreen({ onAuth }: { onAuth: (token: string, user: User) => void })
           <h1 className="text-3xl font-black vm-gradient-text">V-message</h1>
           <p className="text-muted-foreground text-sm mt-1">Мессенджер нового поколения</p>
         </div>
+
         <div className="bg-card rounded-3xl shadow-xl p-6 space-y-4">
+          {/* Табы */}
           <div className="flex bg-secondary rounded-2xl p-1">
             {(["login", "register"] as const).map(t => (
-              <button key={t} onClick={() => { setTab(t); setError(""); }}
+              <button key={t} onClick={() => { setTab(t); setError(""); setRegStep(1); setCode(""); }}
                 className={`flex-1 py-2 rounded-xl text-sm font-semibold transition-all duration-200 ${tab === t ? "vm-gradient-bg text-white shadow-md" : "text-muted-foreground"}`}>
                 {t === "login" ? "Войти" : "Регистрация"}
               </button>
             ))}
           </div>
-          <div className="space-y-3">
-            {tab === "register" && (
+
+          {/* ── ВХОД ── */}
+          {tab === "login" && (
+            <div className="space-y-3">
               <div className="relative">
-                <Icon name="User" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                <input value={displayName} onChange={e => setDisplayName(e.target.value)}
-                  placeholder="Ваше имя (отображаемое)"
-                  className="w-full bg-secondary rounded-xl pl-9 pr-4 py-3 text-sm outline-none focus:ring-2 focus:ring-violet-400/40 transition-all" />
+                <Icon name="Phone" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+7 (999) 123-45-67"
+                  type="tel" className={inputCls} />
               </div>
-            )}
-            <div className="relative">
-              <Icon name="Phone" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-              <input value={phone} onChange={e => setPhone(e.target.value)}
-                placeholder="Номер телефона (+7...)"
-                type="tel"
-                className="w-full bg-secondary rounded-xl pl-9 pr-4 py-3 text-sm outline-none focus:ring-2 focus:ring-violet-400/40 transition-all" />
-            </div>
-            <div className="relative">
-              <Icon name="Lock" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-              <input type="password" value={password} onChange={e => setPassword(e.target.value)}
-                onKeyDown={e => e.key === "Enter" && submit()}
-                placeholder="Пароль (минимум 6 символов)"
-                className="w-full bg-secondary rounded-xl pl-9 pr-4 py-3 text-sm outline-none focus:ring-2 focus:ring-violet-400/40 transition-all" />
-            </div>
-          </div>
-          {error && (
-            <div className="bg-red-50 dark:bg-red-900/20 text-red-500 text-sm px-4 py-2.5 rounded-xl flex items-center gap-2">
-              <Icon name="AlertCircle" size={15} />
-              {error}
+              <div className="relative">
+                <Icon name="Lock" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && submitLogin()}
+                  placeholder="Пароль" className={inputCls} />
+              </div>
+              {error && <div className="bg-red-50 dark:bg-red-900/20 text-red-500 text-sm px-4 py-2.5 rounded-xl flex items-center gap-2"><Icon name="AlertCircle" size={15} />{error}</div>}
+              <button onClick={submitLogin} disabled={loading} className="w-full vm-gradient-bg text-white font-semibold py-3 rounded-xl hover:opacity-90 transition-opacity active:scale-95 shadow-lg shadow-violet-500/30 disabled:opacity-60">
+                {loading ? "Загрузка..." : "Войти"}
+              </button>
             </div>
           )}
-          <button onClick={submit} disabled={loading}
-            className="w-full vm-gradient-bg text-white font-semibold py-3 rounded-xl hover:opacity-90 transition-opacity active:scale-95 shadow-lg shadow-violet-500/30 disabled:opacity-60">
-            {loading ? "Загрузка..." : tab === "login" ? "Войти" : "Создать аккаунт"}
-          </button>
+
+          {/* ── РЕГИСТРАЦИЯ — шаг 1: номер телефона ── */}
+          {tab === "register" && regStep === 1 && (
+            <div className="space-y-3">
+              <p className="text-sm text-muted-foreground text-center">Введи номер телефона — отправим код подтверждения</p>
+              <div className="relative">
+                <Icon name="Phone" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+7 (999) 123-45-67"
+                  type="tel" className={inputCls} onKeyDown={e => e.key === "Enter" && sendCode()} />
+              </div>
+              {error && <div className="bg-red-50 dark:bg-red-900/20 text-red-500 text-sm px-4 py-2.5 rounded-xl flex items-center gap-2"><Icon name="AlertCircle" size={15} />{error}</div>}
+              <button onClick={sendCode} disabled={loading || !phone.trim()} className="w-full vm-gradient-bg text-white font-semibold py-3 rounded-xl hover:opacity-90 transition-opacity active:scale-95 shadow-lg shadow-violet-500/30 disabled:opacity-60">
+                {loading ? "Отправляем..." : "Получить код"}
+              </button>
+            </div>
+          )}
+
+          {/* ── РЕГИСТРАЦИЯ — шаг 2: код + данные ── */}
+          {tab === "register" && regStep === 2 && (
+            <div className="space-y-3">
+              <div className="bg-violet-50 dark:bg-violet-900/20 rounded-xl px-4 py-3 flex items-center justify-between">
+                <div>
+                  <p className="text-xs text-muted-foreground">Код отправлен на</p>
+                  <p className="text-sm font-semibold">{phone}</p>
+                </div>
+                <button onClick={() => { setRegStep(1); setCode(""); setError(""); }} className="text-xs text-violet-500 hover:underline">Изменить</button>
+              </div>
+              <div className="relative">
+                <Icon name="ShieldCheck" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  placeholder="Код из SMS (6 цифр)" inputMode="numeric" maxLength={6}
+                  className={inputCls + " tracking-widest text-center text-lg font-bold"} />
+              </div>
+              <div className="relative">
+                <Icon name="User" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="Ваше имя" className={inputCls} />
+              </div>
+              <div className="relative">
+                <Icon name="Lock" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && submitRegister()}
+                  placeholder="Придумайте пароль (мин. 6 символов)" className={inputCls} />
+              </div>
+              {error && <div className="bg-red-50 dark:bg-red-900/20 text-red-500 text-sm px-4 py-2.5 rounded-xl flex items-center gap-2"><Icon name="AlertCircle" size={15} />{error}</div>}
+              <button onClick={submitRegister} disabled={loading || code.length < 6 || !displayName.trim() || password.length < 6}
+                className="w-full vm-gradient-bg text-white font-semibold py-3 rounded-xl hover:opacity-90 transition-opacity active:scale-95 shadow-lg shadow-violet-500/30 disabled:opacity-60">
+                {loading ? "Создаём аккаунт..." : "Создать аккаунт"}
+              </button>
+              <button onClick={resendCode} disabled={cooldown > 0 || loading} className="w-full text-sm text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50">
+                {cooldown > 0 ? `Повторная отправка через ${cooldown} сек.` : "Отправить код повторно"}
+              </button>
+            </div>
+          )}
+
           <div className="flex items-center gap-2 justify-center">
             <Icon name="Lock" size={12} className="text-emerald-500" />
             <span className="text-xs text-muted-foreground">End-to-End Encryption</span>
@@ -2102,15 +2187,31 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
   const [newUsername, setNewUsername] = useState("");
   const [usernameError, setUsernameError] = useState("");
   const [savingUsername, setSavingUsername] = useState(false);
+  // Смена телефона
+  const [showChangePhone, setShowChangePhone] = useState(false);
+  const [newPhone, setNewPhone] = useState("");
+  const [phoneCode, setPhoneCode] = useState("");
+  const [phoneStep, setPhoneStep] = useState<1|2>(1);
+  const [phoneLoading, setPhoneLoading] = useState(false);
+  const [phoneError, setPhoneError] = useState("");
+  const [phoneCooldown, setPhoneCooldown] = useState(0);
+  // Удаление аккаунта
+  const [showDeleteAccount, setShowDeleteAccount] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const avatarInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (phoneCooldown <= 0) return;
+    const t = setTimeout(() => setPhoneCooldown(v => v - 1), 1000);
+    return () => clearTimeout(t);
+  }, [phoneCooldown]);
 
   const save = async () => {
     setSaving(true);
     const res = await usersApi.update({ display_name: name, bio });
-    if (res.ok) {
-      onUpdate(res.user);
-      setEditing(false);
-    }
+    if (res.ok) { onUpdate(res.user); setEditing(false); }
     setSaving(false);
   };
 
@@ -2128,6 +2229,36 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
       setUsernameError(res.error || "Не удалось сменить имя пользователя");
     }
     setSavingUsername(false);
+  };
+
+  const sendPhoneCode = async () => {
+    setPhoneError("");
+    setPhoneLoading(true);
+    const res = await authApi.sendCode(newPhone.trim(), "change_phone");
+    if (res.ok) { setPhoneStep(2); setPhoneCooldown(60); }
+    else setPhoneError(res.error || "Ошибка отправки кода");
+    setPhoneLoading(false);
+  };
+
+  const confirmPhoneChange = async () => {
+    setPhoneError("");
+    setPhoneLoading(true);
+    const res = await authApi.changePhone(newPhone.trim(), phoneCode.trim());
+    if (res.ok) {
+      onUpdate({ ...me, phone: res.phone });
+      setShowChangePhone(false);
+      setNewPhone(""); setPhoneCode(""); setPhoneStep(1);
+    } else setPhoneError(res.error || "Ошибка");
+    setPhoneLoading(false);
+  };
+
+  const confirmDeleteAccount = async () => {
+    setDeleteError("");
+    setDeleteLoading(true);
+    const res = await authApi.deleteAccount(deletePassword);
+    if (res.ok) onLogout();
+    else setDeleteError(res.error || "Ошибка");
+    setDeleteLoading(false);
   };
 
   const handleAvatarChange = async (file: File) => {
@@ -2222,63 +2353,104 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
         </div>
       </div>
 
+      {/* Личные данные */}
       <div className="mx-4 mt-4 bg-card rounded-3xl p-4 space-y-3 flex-shrink-0">
         <div className="flex items-center justify-between mb-1">
           <span className="font-semibold text-sm">Личные данные</span>
           {editing ? (
             <div className="flex gap-2">
               <button onClick={() => setEditing(false)} className="px-3 py-1.5 rounded-xl text-xs font-medium bg-secondary">Отмена</button>
-              <button onClick={save} disabled={saving}
-                className="px-3 py-1.5 rounded-xl text-xs font-medium vm-gradient-bg text-white shadow-lg shadow-violet-500/30">
+              <button onClick={save} disabled={saving} className="px-3 py-1.5 rounded-xl text-xs font-medium vm-gradient-bg text-white shadow-lg shadow-violet-500/30">
                 {saving ? "..." : "Сохранить"}
               </button>
             </div>
           ) : (
-            <button onClick={() => setEditing(true)}
-              className="px-3 py-1.5 rounded-xl text-xs font-medium bg-secondary hover:bg-violet-50 dark:hover:bg-violet-900/30 transition-colors">
-              Изменить
-            </button>
+            <button onClick={() => setEditing(true)} className="px-3 py-1.5 rounded-xl text-xs font-medium bg-secondary hover:bg-violet-50 dark:hover:bg-violet-900/30 transition-colors">Изменить</button>
           )}
         </div>
         {[
           { label: "Имя", value: name, set: setName, icon: "User" },
-          { label: "Имя пользователя", value: me.username, set: () => {}, icon: "AtSign", readonly: true },
           { label: "О себе", value: bio, set: setBio, icon: "FileText" },
-        ].map(({ label, value, set, icon, readonly }) => (
+        ].map(({ label, value, set, icon }) => (
           <div key={label}>
             <label className="text-xs text-muted-foreground mb-1 block">{label}</label>
             <div className="relative">
               <Icon name={icon as AnyIcon} size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-              {editing && !readonly ? (
-                <input value={value} onChange={e => set(e.target.value)}
-                  className="w-full bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-violet-400/40 transition-all" />
+              {editing ? (
+                <input value={value} onChange={e => set(e.target.value)} className="w-full bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-violet-400/40 transition-all" />
               ) : (
                 <div className="bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm text-foreground/80">{value || "—"}</div>
               )}
             </div>
           </div>
         ))}
+        {/* Телефон — только отображение + кнопка смены */}
+        <div>
+          <label className="text-xs text-muted-foreground mb-1 block">Номер телефона</label>
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Icon name="Phone" size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <div className="bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm text-foreground/80">{me.phone || "—"}</div>
+            </div>
+            <button onClick={() => setShowChangePhone(v => !v)} className="px-3 py-2 rounded-xl text-xs font-medium bg-secondary hover:bg-violet-50 dark:hover:bg-violet-900/30 transition-colors whitespace-nowrap">
+              Сменить
+            </button>
+          </div>
+        </div>
       </div>
 
-      {/* Change username block */}
-      <div className="mx-4 mt-4 bg-card rounded-3xl p-4 space-y-3 flex-shrink-0">
-        <div className="flex items-center justify-between mb-1">
-          <span className="font-semibold text-sm">Имя пользователя</span>
+      {/* Смена телефона */}
+      {showChangePhone && (
+        <div className="mx-4 mt-3 bg-card rounded-3xl p-4 space-y-3 flex-shrink-0 border border-violet-500/30">
+          <div className="flex items-center justify-between">
+            <span className="font-semibold text-sm">Новый номер телефона</span>
+            <button onClick={() => { setShowChangePhone(false); setPhoneStep(1); setNewPhone(""); setPhoneCode(""); setPhoneError(""); }} className="p-1 rounded-lg hover:bg-secondary"><Icon name="X" size={16} className="text-muted-foreground" /></button>
+          </div>
+          {phoneStep === 1 ? (
+            <>
+              <div className="relative">
+                <Icon name="Phone" size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input value={newPhone} onChange={e => setNewPhone(e.target.value)} placeholder="+7 (999) 123-45-67" type="tel"
+                  className="w-full bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-violet-400/40" />
+              </div>
+              {phoneError && <p className="text-xs text-red-400">{phoneError}</p>}
+              <button onClick={sendPhoneCode} disabled={phoneLoading || !newPhone.trim()} className="w-full py-2.5 rounded-xl text-sm font-semibold vm-gradient-bg text-white disabled:opacity-60">
+                {phoneLoading ? "Отправляем..." : "Получить код"}
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="text-xs text-muted-foreground">Код отправлен на {newPhone}</p>
+              <div className="relative">
+                <Icon name="ShieldCheck" size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input value={phoneCode} onChange={e => setPhoneCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  placeholder="Код из SMS" inputMode="numeric" maxLength={6}
+                  className="w-full bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-violet-400/40 tracking-widest text-center font-bold" />
+              </div>
+              {phoneError && <p className="text-xs text-red-400">{phoneError}</p>}
+              <button onClick={confirmPhoneChange} disabled={phoneLoading || phoneCode.length < 6} className="w-full py-2.5 rounded-xl text-sm font-semibold vm-gradient-bg text-white disabled:opacity-60">
+                {phoneLoading ? "Подтверждаем..." : "Подтвердить"}
+              </button>
+              <button onClick={async () => { if (phoneCooldown > 0) return; await sendPhoneCode(); }} disabled={phoneCooldown > 0} className="w-full text-xs text-muted-foreground disabled:opacity-50">
+                {phoneCooldown > 0 ? `Повторно через ${phoneCooldown} сек.` : "Отправить снова"}
+              </button>
+            </>
+          )}
         </div>
+      )}
+
+      {/* Смена username */}
+      <div className="mx-4 mt-4 bg-card rounded-3xl p-4 space-y-3 flex-shrink-0">
+        <span className="font-semibold text-sm">Имя пользователя</span>
         <div>
           <label className="text-xs text-muted-foreground mb-1 block">Текущий: @{me.username}</label>
           <div className="flex gap-2">
             <div className="relative flex-1">
               <Icon name="AtSign" size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-              <input
-                value={newUsername}
-                onChange={e => { setNewUsername(e.target.value); setUsernameError(""); }}
-                placeholder="новый_юзернейм"
-                className="w-full bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-violet-400/40 transition-all"
-              />
+              <input value={newUsername} onChange={e => { setNewUsername(e.target.value); setUsernameError(""); }} placeholder="новый_юзернейм"
+                className="w-full bg-secondary rounded-xl pl-9 pr-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-violet-400/40 transition-all" />
             </div>
-            <button onClick={saveUsername} disabled={savingUsername || !newUsername.trim()}
-              className="px-3 py-2 rounded-xl text-xs font-semibold vm-gradient-bg text-white shadow-lg shadow-violet-500/30 disabled:opacity-60 whitespace-nowrap">
+            <button onClick={saveUsername} disabled={savingUsername || !newUsername.trim()} className="px-3 py-2 rounded-xl text-xs font-semibold vm-gradient-bg text-white shadow-lg shadow-violet-500/30 disabled:opacity-60 whitespace-nowrap">
               {savingUsername ? "..." : "Сменить"}
             </button>
           </div>
@@ -2286,15 +2458,44 @@ function ProfileSection({ me, onUpdate, onLogout }: { me: User; onUpdate: (u: Us
         </div>
       </div>
 
+      {/* Выйти + Удалить аккаунт */}
       <div className="mx-4 mt-4 mb-4 bg-card rounded-3xl p-2 flex-shrink-0">
-        <button onClick={onLogout}
-          className="w-full flex items-center gap-3 px-3 py-3 rounded-2xl hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors text-red-500">
+        <button onClick={onLogout} className="w-full flex items-center gap-3 px-3 py-3 rounded-2xl hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors text-red-500">
           <div className="w-8 h-8 rounded-xl bg-red-100 dark:bg-red-900/30 flex items-center justify-center flex-shrink-0">
             <Icon name="LogOut" size={16} className="text-red-500" />
           </div>
           <span className="text-sm font-medium">Выйти из аккаунта</span>
         </button>
+        <button onClick={() => setShowDeleteAccount(v => !v)} className="w-full flex items-center gap-3 px-3 py-3 rounded-2xl hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors text-red-500">
+          <div className="w-8 h-8 rounded-xl bg-red-100 dark:bg-red-900/30 flex items-center justify-center flex-shrink-0">
+            <Icon name="Trash2" size={16} className="text-red-500" />
+          </div>
+          <span className="text-sm font-medium">Удалить аккаунт</span>
+        </button>
       </div>
+
+      {/* Удаление аккаунта — подтверждение */}
+      {showDeleteAccount && (
+        <div className="mx-4 mb-4 bg-red-50 dark:bg-red-900/20 rounded-3xl p-4 space-y-3 flex-shrink-0 border border-red-300/50">
+          <div className="flex items-center gap-2 text-red-600">
+            <Icon name="AlertTriangle" size={18} />
+            <span className="font-semibold text-sm">Удаление аккаунта</span>
+          </div>
+          <p className="text-xs text-red-500">Это действие необратимо. Все данные будут удалены. Введи пароль для подтверждения.</p>
+          <div className="relative">
+            <Icon name="Lock" size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-red-400" />
+            <input type="password" value={deletePassword} onChange={e => setDeletePassword(e.target.value)} placeholder="Твой пароль"
+              className="w-full bg-white dark:bg-red-900/30 border border-red-300/50 rounded-xl pl-9 pr-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-red-400/40" />
+          </div>
+          {deleteError && <p className="text-xs text-red-600">{deleteError}</p>}
+          <div className="flex gap-2">
+            <button onClick={() => { setShowDeleteAccount(false); setDeletePassword(""); setDeleteError(""); }} className="flex-1 py-2.5 rounded-xl text-sm font-medium bg-white dark:bg-red-900/30 border border-red-300/50">Отмена</button>
+            <button onClick={confirmDeleteAccount} disabled={deleteLoading || !deletePassword} className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-red-500 text-white hover:bg-red-600 disabled:opacity-60 transition-colors">
+              {deleteLoading ? "..." : "Удалить навсегда"}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
