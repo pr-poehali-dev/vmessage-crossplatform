@@ -2631,10 +2631,19 @@ function StickerPacksManager() {
                 <div className="font-medium text-sm truncate">{pack.name}</div>
                 <div className="text-xs text-muted-foreground">{pack.sticker_count} стикеров · {pack.is_public ? "публичный" : "приватный"}</div>
               </div>
-              <button onClick={() => setExpandedPack(expandedPack === pack.id ? null : pack.id)}
-                className="p-1.5 rounded-lg hover:bg-card transition-colors">
-                <Icon name={expandedPack === pack.id ? "ChevronUp" : "ChevronDown"} size={16} className="text-muted-foreground" />
-              </button>
+              <div className="flex items-center gap-1">
+                <button onClick={() => setExpandedPack(expandedPack === pack.id ? null : pack.id)}
+                  className="p-1.5 rounded-lg hover:bg-card transition-colors">
+                  <Icon name={expandedPack === pack.id ? "ChevronUp" : "ChevronDown"} size={16} className="text-muted-foreground" />
+                </button>
+                <button onClick={async () => {
+                  if (!confirm(`Удалить пак «${pack.name}»? Это действие необратимо.`)) return;
+                  const res = await chatsApi.deletePack(pack.id);
+                  if (res.ok) await load();
+                }} className="p-1.5 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">
+                  <Icon name="Trash2" size={15} className="text-red-400" />
+                </button>
+              </div>
             </div>
 
             {expandedPack === pack.id && (
@@ -2847,6 +2856,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
   const [inviteCode, setInviteCode] = useState("");
   const [ctxMenu, setCtxMenu] = useState<{msgId: number; x: number; y: number; out: boolean; text?: string; type?: string} | null>(null);
   const [editingMsgId, setEditingMsgId] = useState<number | null>(null);
+  const [replyTo, setReplyTo] = useState<{id: number; text: string; sender: string} | null>(null);
   const [reactions, setReactions] = useState<Record<string, {emoji: string; count: number; my: boolean}[]>>({});
   const [showStickerPanel, setShowStickerPanel] = useState(false);
   const [stickerPacks, setStickerPacks] = useState<{id: number; name: string; stickers: {id: number; image_url: string; emoji: string}[]}[]>([]);
@@ -2987,23 +2997,39 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
       setEditingMsgId(null);
       return;
     }
-    const res = await chatsApi.send(chat.id, sendText);
+    const currentReply = replyTo;
+    setReplyTo(null);
+    const res = await chatsApi.send(chat.id, sendText, currentReply?.id);
     if (res.ok) {
       setMessages(m => [...m, {
         ...res.message,
         text, // показываем расшифрованный текст сразу
         sender_id: me.id, sender_name: me.display_name,
-        sender_color: me.avatar_color, sender_username: me.username
+        sender_color: me.avatar_color, sender_username: me.username,
+        reply_to_id: currentReply?.id ?? null,
+        reply_to_text: currentReply?.text ?? null,
+        reply_to_sender: currentReply?.sender ?? null,
       }]);
     }
   };
 
+  // Надёжная конвертация Blob → base64 через ArrayBuffer (работает на любом размере)
   const blobToBase64 = (blob: Blob): Promise<string> =>
     new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onload = () => resolve((reader.result as string).split(",")[1]);
+      reader.onload = () => {
+        const buf = reader.result as ArrayBuffer;
+        // Конвертируем по кускам, чтобы не переполнять стек call stack
+        const bytes = new Uint8Array(buf);
+        let binary = "";
+        const STEP = 8192;
+        for (let i = 0; i < bytes.length; i += STEP) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + STEP));
+        }
+        resolve(btoa(binary));
+      };
       reader.onerror = reject;
-      reader.readAsDataURL(blob);
+      reader.readAsArrayBuffer(blob);
     });
 
   const sendVoice = async (blob: Blob, duration: number) => {
@@ -3363,11 +3389,26 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     }
 
     return (
-      <div className={`flex flex-col ${m.out ? "items-end" : "items-start"} animate-fade-in`}>
+      <div id={`msg-${m.id}`} className={`flex flex-col ${m.out ? "items-end" : "items-start"} animate-fade-in transition-colors rounded-2xl`}>
         <div className={`flex ${m.out ? "justify-end" : "justify-start"} w-full`} {...ctxHandlers}>
           <div className={`max-w-[72%] px-4 py-2.5 text-sm ${m.out ? "vm-msg-out" : "vm-msg-in dark:text-white text-gray-800"}`}>
             {!m.out && (chat.type === "group" || chat.type === "channel") && m.sender_name && (
               <div className="text-xs font-semibold mb-1" style={{ color: m.sender_color || "#8b5cf6" }}>{m.sender_name}</div>
+            )}
+            {/* Цитата */}
+            {m.reply_to_id && (
+              <div className={`flex gap-1.5 mb-2 pl-2 border-l-2 ${m.out ? "border-white/50" : "border-violet-400"} opacity-80`}
+                onClick={() => {
+                  const el = document.getElementById(`msg-${m.reply_to_id}`);
+                  el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                  el?.classList.add("bg-violet-100", "dark:bg-violet-900/40");
+                  setTimeout(() => el?.classList.remove("bg-violet-100", "dark:bg-violet-900/40"), 1500);
+                }}>
+                <div className="min-w-0">
+                  <div className={`text-[11px] font-semibold truncate ${m.out ? "text-white/70" : "text-violet-500"}`}>{m.reply_to_sender}</div>
+                  <div className={`text-[11px] truncate ${m.out ? "text-white/60" : "text-muted-foreground"}`}>{(m.reply_to_text || "").slice(0, 80)}</div>
+                </div>
+              </div>
             )}
             <p className="leading-relaxed whitespace-pre-wrap">{editingMsgId === m.id ? <span className="opacity-50 italic">{m.text}</span> : m.text}</p>
             <div className={`flex items-center justify-end gap-1 mt-1 ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
@@ -3436,6 +3477,19 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
                 </button>
               ))}
             </div>
+            {/* Reply */}
+            <button onClick={() => {
+              const msg = messages.find(m => m.id === ctxMenu.msgId);
+              if (msg) {
+                setReplyTo({ id: msg.id, text: msg.text || "", sender: msg.sender_name || "Сообщение" });
+                setEditingMsgId(null);
+              }
+              setCtxMenu(null);
+              setTimeout(() => inputRef.current?.focus(), 50);
+            }} className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-secondary text-sm transition-colors">
+              <Icon name="Reply" size={16} className="text-violet-400" />
+              Ответить
+            </button>
             {/* Copy */}
             {ctxMenu.text && (
               <button onClick={() => { navigator.clipboard?.writeText(ctxMenu.text!); setCtxMenu(null); }}
@@ -3682,6 +3736,20 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
               )}
             </div>
 
+            {replyTo && !editingMsgId && (
+              <div className="absolute bottom-full left-0 right-0 px-4 pb-1">
+                <div className="flex items-center gap-2 bg-violet-100 dark:bg-violet-900/40 rounded-xl px-3 py-1.5 text-xs">
+                  <Icon name="Reply" size={12} className="text-violet-500 flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <span className="font-semibold text-violet-600 dark:text-violet-300">{replyTo.sender}</span>
+                    <span className="text-muted-foreground ml-1 truncate block">{replyTo.text.slice(0, 60)}{replyTo.text.length > 60 ? "…" : ""}</span>
+                  </div>
+                  <button onClick={() => setReplyTo(null)} className="text-muted-foreground hover:text-foreground flex-shrink-0">
+                    <Icon name="X" size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
             {editingMsgId && (
               <div className="absolute bottom-full left-0 right-0 px-4 pb-1">
                 <div className="flex items-center gap-2 bg-violet-100 dark:bg-violet-900/40 rounded-xl px-3 py-1.5 text-xs text-violet-600 dark:text-violet-300">

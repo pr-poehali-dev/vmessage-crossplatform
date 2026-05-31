@@ -347,7 +347,8 @@ def handler(event: dict, context) -> dict:
             SELECT m.id, m.msg_text, m.msg_type, m.msg_status, m.created_at, m.sender_id,
                    u.display_name, u.avatar_color, u.username,
                    (m.sender_id = %s) as is_out,
-                   m.media_url, COALESCE(m.edited, FALSE)
+                   m.media_url, COALESCE(m.edited, FALSE),
+                   m.reply_to_id, m.reply_to_text, m.reply_to_sender
             FROM {SCHEMA}.vm_messages m
             JOIN {SCHEMA}.vm_users u ON u.id=m.sender_id
             WHERE m.chat_id=%s AND m.is_hidden=FALSE
@@ -370,6 +371,9 @@ def handler(event: dict, context) -> dict:
             "out": bool(r[9]),
             "media_url": r[10],
             "edited": bool(r[11]),
+            "reply_to_id": r[12],
+            "reply_to_text": r[13],
+            "reply_to_sender": r[14],
         } for r in rows]
 
         cur.close(); conn.close()
@@ -379,6 +383,7 @@ def handler(event: dict, context) -> dict:
     if action == "send":
         chat_id = body.get("chat_id")
         text = (body.get("text") or "").strip()
+        reply_to_id = body.get("reply_to_id")  # ID сообщения на которое отвечаем
         if not chat_id or not text:
             cur.close(); conn.close()
             return resp(400, {"error": "Нужен chat_id и text"})
@@ -412,14 +417,34 @@ def handler(event: dict, context) -> dict:
                 cur.close(); conn.close()
                 return resp(403, {"error": "Пользователь вас заблокировал"})
 
+        # Получаем данные цитируемого сообщения
+        reply_text = None
+        reply_sender = None
+        if reply_to_id:
+            cur.execute(
+                f"SELECT msg_text, (SELECT display_name FROM {SCHEMA}.vm_users WHERE id=sender_id) FROM {SCHEMA}.vm_messages WHERE id=%s AND is_hidden=FALSE",
+                (reply_to_id,)
+            )
+            reply_row = cur.fetchone()
+            if reply_row:
+                reply_text = (reply_row[0] or "")[:200]
+                reply_sender = reply_row[1] or ""
+
         cur.execute(
-            f"INSERT INTO {SCHEMA}.vm_messages (chat_id, sender_id, msg_text, msg_type, msg_status) VALUES (%s, %s, %s, 'text', 'sent') RETURNING id, created_at",
-            (chat_id, user_id, text)
+            f"""INSERT INTO {SCHEMA}.vm_messages
+                (chat_id, sender_id, msg_text, msg_type, msg_status, reply_to_id, reply_to_text, reply_to_sender)
+                VALUES (%s, %s, %s, 'text', 'sent', %s, %s, %s)
+                RETURNING id, created_at""",
+            (chat_id, user_id, text, reply_to_id, reply_text, reply_sender)
         )
         row = cur.fetchone()
         conn.commit()
         cur.close(); conn.close()
-        return resp(200, {"ok": True, "message": {"id": row[0], "time": row[1].strftime("%H:%M"), "text": text, "type": "text", "status": "sent", "out": True}})
+        return resp(200, {"ok": True, "message": {
+            "id": row[0], "time": row[1].strftime("%H:%M"), "text": text, "type": "text",
+            "status": "sent", "out": True,
+            "reply_to_id": reply_to_id, "reply_to_text": reply_text, "reply_to_sender": reply_sender
+        }})
 
     # send_media
     if action == "send_media":
@@ -1078,6 +1103,28 @@ def handler(event: dict, context) -> dict:
             return resp(400, {"error": "Нужен pack_id"})
         cur.execute(f"UPDATE {SCHEMA}.vm_user_sticker_packs SET user_id=user_id WHERE user_id=%s AND pack_id=%s", (user_id, pack_id))
         cur.execute(f"DELETE FROM {SCHEMA}.vm_user_sticker_packs WHERE user_id=%s AND pack_id=%s", (user_id, pack_id))
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
+
+    # delete_pack — полностью удалить свой пак (только владелец)
+    if action == "delete_pack":
+        pack_id = body.get("pack_id")
+        if not pack_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен pack_id"})
+        cur.execute(f"SELECT owner_id FROM {SCHEMA}.vm_sticker_packs WHERE id=%s", (pack_id,))
+        pack_row = cur.fetchone()
+        if not pack_row:
+            cur.close(); conn.close()
+            return resp(404, {"error": "Пак не найден"})
+        if pack_row[0] != user_id:
+            cur.close(); conn.close()
+            return resp(403, {"error": "Только владелец может удалить пак"})
+        # Удаляем подписки, стикеры и сам пак
+        cur.execute(f"DELETE FROM {SCHEMA}.vm_user_sticker_packs WHERE pack_id=%s", (pack_id,))
+        cur.execute(f"DELETE FROM {SCHEMA}.vm_stickers WHERE pack_id=%s", (pack_id,))
+        cur.execute(f"DELETE FROM {SCHEMA}.vm_sticker_packs WHERE id=%s", (pack_id,))
         conn.commit()
         cur.close(); conn.close()
         return resp(200, {"ok": True})

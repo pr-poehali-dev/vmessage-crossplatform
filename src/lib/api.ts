@@ -78,6 +78,9 @@ export interface Message {
   out: boolean;
   media_url?: string;
   edited?: boolean;
+  reply_to_id?: number | null;
+  reply_to_text?: string | null;
+  reply_to_sender?: string | null;
 }
 
 async function call(baseUrl: string, action: string, method = "GET", body?: object, token?: string | null, extraQuery?: Record<string, string>) {
@@ -153,8 +156,8 @@ export const chatsApi = {
   messages: (chat_id: number) =>
     call(CHATS_URL, "messages", "GET", undefined, undefined, { chat_id: String(chat_id) }),
 
-  send: (chat_id: number, text: string) =>
-    call(CHATS_URL, "send", "POST", { chat_id, text }),
+  send: (chat_id: number, text: string, reply_to_id?: number) =>
+    call(CHATS_URL, "send", "POST", { chat_id, text, reply_to_id }),
 
   sendMedia: (chat_id: number, data: string, mime_type: string, msg_type: string, text: string, filename = "") =>
     call(CHATS_URL, "send_media", "POST", { chat_id, data, mime_type, msg_type, text, filename }),
@@ -229,6 +232,7 @@ export const chatsApi = {
     call(CHATS_URL, "send_sticker", "POST", { chat_id, sticker_id }),
   addPack: (pack_id: number) => call(CHATS_URL, "add_pack", "POST", { pack_id }),
   removePack: (pack_id: number) => call(CHATS_URL, "remove_pack", "POST", { pack_id }),
+  deletePack: (pack_id: number) => call(CHATS_URL, "delete_pack", "POST", { pack_id }),
 };
 
 // Users
