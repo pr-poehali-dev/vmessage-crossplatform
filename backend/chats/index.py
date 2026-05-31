@@ -347,7 +347,7 @@ def handler(event: dict, context) -> dict:
             SELECT m.id, m.msg_text, m.msg_type, m.msg_status, m.created_at, m.sender_id,
                    u.display_name, u.avatar_color, u.username,
                    (m.sender_id = %s) as is_out,
-                   m.media_url
+                   m.media_url, COALESCE(m.edited, FALSE)
             FROM {SCHEMA}.vm_messages m
             JOIN {SCHEMA}.vm_users u ON u.id=m.sender_id
             WHERE m.chat_id=%s AND m.is_hidden=FALSE
@@ -369,6 +369,7 @@ def handler(event: dict, context) -> dict:
             "sender_color": r[7], "sender_username": r[8],
             "out": bool(r[9]),
             "media_url": r[10],
+            "edited": bool(r[11]),
         } for r in rows]
 
         cur.close(); conn.close()
@@ -443,13 +444,18 @@ def handler(event: dict, context) -> dict:
             cur.close(); conn.close()
             return resp(403, {"error": "Только администраторы могут писать"})
 
-        folder_map = {"voice": "voice", "video_note": "video_notes", "image": "images", "video": "videos", "file": "files", "location": ""}
+        folder_map = {"voice": "voice", "video_note": "video_notes", "image": "images", "video": "videos", "file": "files", "audio": "audio", "location": ""}
         folder = folder_map.get(msg_type, "files")
 
         if msg_type == "location":
             media_url = None
         else:
-            media_url = upload_to_s3(data_b64, mime_type, folder, filename)
+            try:
+                media_url = upload_to_s3(data_b64, mime_type, folder, filename)
+            except Exception as e:
+                print(f"[S3 ERROR send_media] {e}")
+                cur.close(); conn.close()
+                return resp(500, {"error": "Ошибка загрузки файла. Попробуйте ещё раз."})
 
         cur.execute(
             f"INSERT INTO {SCHEMA}.vm_messages (chat_id, sender_id, msg_text, msg_type, msg_status, media_url) VALUES (%s, %s, %s, %s, 'sent', %s) RETURNING id, created_at",
@@ -464,7 +470,7 @@ def handler(event: dict, context) -> dict:
             "status": "sent", "out": True, "media_url": media_url
         }})
 
-    # upload_media — прямая загрузка файла через base64 (надёжнее presigned URL)
+    # upload_media — прямая загрузка файла через base64
     if action == "upload_media":
         chat_id = body.get("chat_id")
         data_b64 = body.get("data", "")
@@ -485,6 +491,7 @@ def handler(event: dict, context) -> dict:
         folder_map = {"voice": "voice", "video_note": "video_notes", "image": "images", "video": "videos", "file": "files", "audio": "audio"}
         folder = folder_map.get(msg_type, "files")
 
+        # Определяем расширение
         if filename and "." in filename:
             ext = filename.rsplit(".", 1)[-1].lower()[:10]
         elif mime_type in MIME_EXT:
@@ -496,15 +503,26 @@ def handler(event: dict, context) -> dict:
         key = f"{folder}/{uuid.uuid4()}.{ext}"
         cdn_url = f"https://cdn.poehali.dev/projects/{os.environ['AWS_ACCESS_KEY_ID']}/bucket/{key}"
 
-        file_data = base64.b64decode(data_b64)
-        s3 = boto3.client(
-            "s3",
-            endpoint_url="https://bucket.poehali.dev",
-            aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
-            aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-        )
-        s3.put_object(Bucket="files", Key=key, Body=file_data, ContentType=mime_type)
-        print(f"[UPLOAD] msg_type={msg_type} key={key} size={len(file_data)}")
+        try:
+            file_data = base64.b64decode(data_b64)
+        except Exception as e:
+            print(f"[BASE64 ERROR] {e}")
+            cur.close(); conn.close()
+            return resp(400, {"error": "Ошибка декодирования файла"})
+
+        try:
+            s3 = boto3.client(
+                "s3",
+                endpoint_url="https://bucket.poehali.dev",
+                aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+                aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+            )
+            s3.put_object(Bucket="files", Key=key, Body=file_data, ContentType=mime_type)
+            print(f"[UPLOAD] msg_type={msg_type} ext={ext} size={len(file_data)}")
+        except Exception as e:
+            print(f"[S3 ERROR upload_media] {e}")
+            cur.close(); conn.close()
+            return resp(500, {"error": "Ошибка загрузки файла. Попробуйте ещё раз."})
 
         cur.execute(
             f"INSERT INTO {SCHEMA}.vm_messages (chat_id, sender_id, msg_text, msg_type, msg_status, media_url) VALUES (%s, %s, %s, %s, 'sent', %s) RETURNING id, created_at",
@@ -518,6 +536,53 @@ def handler(event: dict, context) -> dict:
             "text": text, "type": msg_type,
             "status": "sent", "out": True, "media_url": cdn_url
         }})
+
+    # clear_history — очистить историю чата (сообщения скрываются для пользователя)
+    if action == "clear_history":
+        chat_id = body.get("chat_id")
+        if not chat_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нет chat_id"})
+        cur.execute(f"SELECT 1 FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нет доступа"})
+        cur.execute(f"UPDATE {SCHEMA}.vm_messages SET is_hidden=TRUE WHERE chat_id=%s", (chat_id,))
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
+
+    # edit_message — редактировать своё сообщение (в течение 15 минут)
+    if action == "edit_message":
+        msg_id = body.get("message_id")
+        new_text = (body.get("text") or "").strip()
+        if not msg_id or not new_text:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен message_id и text"})
+        cur.execute(
+            f"""SELECT id, msg_type, created_at FROM {SCHEMA}.vm_messages
+                WHERE id=%s AND sender_id=%s AND is_hidden=FALSE""",
+            (msg_id, user_id)
+        )
+        msg_row = cur.fetchone()
+        if not msg_row:
+            cur.close(); conn.close()
+            return resp(404, {"error": "Сообщение не найдено"})
+        if msg_row[1] not in ("text", "reply"):
+            cur.close(); conn.close()
+            return resp(400, {"error": "Редактировать можно только текстовые сообщения"})
+        import datetime
+        age = (datetime.datetime.now(datetime.timezone.utc) - msg_row[2]).total_seconds()
+        if age > 900:  # 15 минут
+            cur.close(); conn.close()
+            return resp(403, {"error": "Сообщение можно редактировать только в течение 15 минут"})
+        cur.execute(
+            f"UPDATE {SCHEMA}.vm_messages SET msg_text=%s, edited=TRUE WHERE id=%s",
+            (new_text, msg_id)
+        )
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "text": new_text})
 
     # send_location — отправить геолокацию как текстовое сообщение
     if action == "send_location":

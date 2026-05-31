@@ -37,12 +37,15 @@ interface VoiceMessageProps {
   isOut: boolean;
   status?: string;
 }
+const SPEEDS = [0.5, 1, 1.5, 2] as const;
+
 const VoiceMessage = ({ mediaUrl, dur, time, isOut, status }: VoiceMessageProps) => {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(dur);
+  const [speed, setSpeed] = useState<number>(1);
   const endedRef = useRef(false);
 
   const fmt = (s: number) => {
@@ -61,8 +64,8 @@ const VoiceMessage = ({ mediaUrl, dur, time, isOut, status }: VoiceMessageProps)
         endedRef.current = false;
         setProgress(0);
         setCurrentTime(0);
-        audio.addEventListener("seeked", () => audio.play().catch(() => {}), { once: true });
         audio.currentTime = 0;
+        audio.play().catch(() => {});
       } else {
         audio.play().catch(() => {});
       }
@@ -79,23 +82,26 @@ const VoiceMessage = ({ mediaUrl, dur, time, isOut, status }: VoiceMessageProps)
     if (!playing) audio.play().catch(() => {});
   };
 
+  const cycleSpeed = () => {
+    const audio = audioRef.current;
+    const next = SPEEDS[(SPEEDS.indexOf(speed as typeof SPEEDS[number]) + 1) % SPEEDS.length];
+    setSpeed(next);
+    if (audio) audio.playbackRate = next;
+  };
+
   return (
-    <div className={`flex items-center gap-2 px-3 py-2.5 rounded-2xl max-w-[260px] w-[220px] ${isOut ? "vm-msg-out" : "vm-msg-in"}`}>
+    <div className={`flex items-center gap-2 px-3 py-2.5 rounded-2xl max-w-[280px] w-[250px] ${isOut ? "vm-msg-out" : "vm-msg-in"}`}>
       <audio
         ref={audioRef}
         src={mediaUrl}
         preload="metadata"
-        onLoadedMetadata={e => setDuration(Math.round(e.currentTarget.duration) || dur)}
+        onLoadedMetadata={e => { setDuration(Math.round(e.currentTarget.duration) || dur); e.currentTarget.playbackRate = speed; }}
         onTimeUpdate={e => {
           const a = e.currentTarget;
           setCurrentTime(a.currentTime);
           setProgress(a.duration ? (a.currentTime / a.duration) * 100 : 0);
         }}
-        onEnded={() => {
-          endedRef.current = true;
-          setPlaying(false);
-          setProgress(100);
-        }}
+        onEnded={() => { endedRef.current = true; setPlaying(false); setProgress(0); setCurrentTime(0); }}
         onPause={() => setPlaying(false)}
         onPlay={() => { endedRef.current = false; setPlaying(true); }}
       />
@@ -103,24 +109,32 @@ const VoiceMessage = ({ mediaUrl, dur, time, isOut, status }: VoiceMessageProps)
         className="w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center vm-gradient-bg text-white"
         onClick={toggle}
       >
-        <Icon name={playing ? "Pause" : "Play"} size={14} />
+        <Icon name={playing ? "Pause" : "Play"} size={14} className={playing ? "" : "translate-x-0.5"} />
       </button>
       <div className="flex-1 min-w-0">
         <div
-          className={`relative h-1.5 rounded-full overflow-hidden cursor-pointer ${isOut ? "bg-white/20" : "bg-violet-200 dark:bg-violet-800"}`}
+          className={`relative h-2 rounded-full overflow-hidden cursor-pointer ${isOut ? "bg-white/20" : "bg-violet-200 dark:bg-violet-800"}`}
           onClick={handleSeek}
         >
-          <div className={`h-full rounded-full transition-none ${isOut ? "bg-white/70" : "bg-violet-500"}`} style={{ width: `${progress}%` }} />
+          <div className={`h-full rounded-full transition-none ${isOut ? "bg-white/80" : "bg-violet-500"}`} style={{ width: `${progress}%` }} />
         </div>
         <div className={`text-[10px] mt-1 flex items-center justify-between ${isOut ? "text-white/60" : "text-muted-foreground"}`}>
-          <span>{playing ? fmt(currentTime) : (duration ? `${duration}с` : "голосовое")}</span>
-          <span className="flex items-center gap-0.5">
-            {time}
-            {isOut && (status === "read"
-              ? <Icon name="CheckCheck" size={9} className="text-cyan-300" />
-              : <Icon name="CheckCheck" size={9} />
-            )}
-          </span>
+          <span>{playing || progress > 0 ? fmt(currentTime) : (duration ? fmt(duration) : "голосовое")}</span>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={cycleSpeed}
+              className={`text-[10px] font-bold px-1 rounded transition-colors ${isOut ? "text-white/70 hover:text-white" : "text-violet-500 hover:text-violet-700"}`}
+            >
+              {speed}x
+            </button>
+            <span className="flex items-center gap-0.5">
+              {time}
+              {isOut && (status === "read"
+                ? <Icon name="CheckCheck" size={9} className="text-cyan-300" />
+                : <Icon name="CheckCheck" size={9} />
+              )}
+            </span>
+          </div>
         </div>
       </div>
     </div>
@@ -659,95 +673,117 @@ function VideoNoteRecorder({ onSend, onCancel }: {
 
 // ─── Video Note Message ───────────────────────────────────────────────────────
 function VideoNoteMessage({ m }: { m: Message }) {
-  const [open, setOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [currentSec, setCurrentSec] = useState(0);
   const [videoError, setVideoError] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const fullRef = useRef<HTMLVideoElement>(null);
 
-  const togglePlay = (e: { stopPropagation: () => void }) => {
+  const dur = m.text?.match(/(\d+)с/) ? parseInt(m.text.match(/(\d+)с/)![1]) : 0;
+  const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s) % 60).padStart(2, "0")}`;
+
+  const togglePlay = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!videoError) setOpen(true);
-  };
-
-  useEffect(() => {
-    if (open && fullRef.current) {
-      fullRef.current.load();
-      fullRef.current.play().then(() => setPlaying(true)).catch(() => {});
-    }
-  }, [open]);
-
-  const onTimeUpdate = () => {
-    const v = fullRef.current;
-    if (!v || !v.duration) return;
-    setProgress((v.currentTime / v.duration) * 100);
-  };
-
-  const onEnded = () => { setPlaying(false); setProgress(0); };
-
-  const toggleFullPlay = () => {
-    const v = fullRef.current;
-    if (!v) return;
+    const v = videoRef.current;
+    if (!v || videoError) return;
+    if (!expanded) setExpanded(true);
     if (v.paused) { v.play().then(() => setPlaying(true)).catch(() => {}); }
     else { v.pause(); setPlaying(false); }
   };
 
-  const dur = m.text?.match(/(\d+)с/) ? parseInt(m.text.match(/(\d+)с/)![1]) : 0;
-  const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const close = () => {
+    videoRef.current?.pause();
+    setExpanded(false);
+    setPlaying(false);
+  };
+
+  const size = expanded ? 260 : 140;
 
   return (
     <>
-      <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in`}>
+      {/* Затемнение фона при увеличении */}
+      {expanded && (
+        <div className="fixed inset-0 z-40 bg-black/60 animate-fade-in" onClick={close} />
+      )}
+
+      <div className={`flex ${m.out ? "justify-end" : "justify-start"} animate-fade-in ${expanded ? "relative z-50" : ""}`}>
         <div className="flex flex-col items-center gap-1">
           <div
-            onClick={m.media_url ? togglePlay : undefined}
-            className={`w-[140px] h-[140px] rounded-full overflow-hidden relative shadow-xl ${m.media_url && !videoError ? "cursor-pointer" : ""} ${m.out ? "border-[3px] border-violet-400/60" : "border-[3px] border-white dark:border-gray-600"}`}
+            style={{ width: size, height: size, transition: "width 0.25s ease, height 0.25s ease" }}
+            className={`rounded-full overflow-hidden relative shadow-xl cursor-pointer flex-shrink-0
+              ${m.out ? "border-[3px] border-violet-400/60" : "border-[3px] border-white dark:border-gray-600"}`}
+            onClick={togglePlay}
           >
-            {m.media_url ? (
+            {m.media_url && !videoError ? (
               <>
-                {!videoError ? (
-                  <video
-                    ref={videoRef}
-                    className="w-full h-full object-cover"
-                    muted playsInline preload="metadata"
-                    onError={() => setVideoError(true)}
-                  >
-                    <source src={m.media_url} type="video/mp4" />
-                    <source src={m.media_url} type="video/webm" />
-                  </video>
-                ) : (
-                  <div className="w-full h-full bg-violet-900/60" />
-                )}
-                {videoError ? (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-violet-900/80">
-                    <Icon name="Video" size={28} className="text-white/70" />
-                    <a href={m.media_url} target="_blank" rel="noreferrer"
-                      className="text-white text-[11px] underline underline-offset-2 px-2 text-center leading-tight"
-                      onClick={e => e.stopPropagation()}>
-                      Открыть
-                    </a>
+                <video
+                  ref={videoRef}
+                  className="w-full h-full object-cover"
+                  playsInline
+                  preload="metadata"
+                  onError={() => setVideoError(true)}
+                  onTimeUpdate={e => {
+                    const v = e.currentTarget;
+                    setCurrentSec(v.currentTime);
+                    setProgress(v.duration ? (v.currentTime / v.duration) * 100 : 0);
+                  }}
+                  onEnded={() => { setPlaying(false); setProgress(0); setCurrentSec(0); if (videoRef.current) videoRef.current.currentTime = 0; }}
+                  onPause={() => setPlaying(false)}
+                  onPlay={() => setPlaying(true)}
+                >
+                  <source src={m.media_url} type="video/mp4" />
+                  <source src={m.media_url} type="video/webm" />
+                </video>
+                {/* Кольцо прогресса */}
+                <svg className="absolute inset-0 w-full h-full -rotate-90 pointer-events-none" viewBox="0 0 100 100">
+                  <circle cx="50" cy="50" r="47" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="3" />
+                  <circle cx="50" cy="50" r="47" fill="none" stroke="white" strokeWidth="3"
+                    strokeDasharray={`${2 * Math.PI * 47}`}
+                    strokeDashoffset={`${2 * Math.PI * 47 * (1 - progress / 100)}`}
+                    style={{ transition: "stroke-dashoffset 0.2s linear" }} />
+                </svg>
+                {/* Play/Pause overlay */}
+                <div className={`absolute inset-0 flex items-center justify-center transition-opacity ${playing ? "opacity-0 hover:opacity-100" : "opacity-100"}`}>
+                  <div className="w-12 h-12 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center">
+                    <Icon name={playing ? "Pause" : "Play"} size={expanded ? 28 : 20} className="text-white translate-x-0.5" />
                   </div>
-                ) : (
-                  <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
-                    <div className="w-12 h-12 rounded-full bg-white/25 backdrop-blur-sm flex items-center justify-center">
-                      <Icon name="Play" size={22} className="text-white translate-x-0.5" />
-                    </div>
-                  </div>
-                )}
-                {dur > 0 && !videoError && (
-                  <div className="absolute bottom-4 left-0 right-0 flex justify-center">
-                    <span className="text-white text-[11px] font-semibold drop-shadow">{fmt(dur)}</span>
-                  </div>
-                )}
+                </div>
+                {/* Время */}
+                <div className="absolute bottom-3 left-0 right-0 flex justify-center pointer-events-none">
+                  <span className="text-white text-[11px] font-semibold drop-shadow">
+                    {playing ? fmt(currentSec) : (dur > 0 ? fmt(dur) : "")}
+                  </span>
+                </div>
               </>
             ) : (
-              <div className="w-full h-full flex items-center justify-center bg-violet-100 dark:bg-violet-900">
-                <Icon name="Video" size={36} className="text-violet-400" />
+              <div className="w-full h-full flex flex-col items-center justify-center bg-violet-900/60 gap-2">
+                <Icon name="Video" size={expanded ? 48 : 32} className="text-white/70" />
+                {m.media_url && (
+                  <a href={m.media_url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
+                    className="text-white text-[11px] underline">Открыть</a>
+                )}
               </div>
             )}
           </div>
-          <div className={`flex items-center gap-1 text-[10px] ${m.out ? "text-muted-foreground" : "text-muted-foreground"}`}>
+
+          {/* Кнопка закрыть + скачать при раскрытии */}
+          {expanded && (
+            <div className="flex items-center gap-2 mt-1 z-50">
+              {m.media_url && (
+                <a href={m.media_url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
+                  className="w-8 h-8 rounded-full bg-black/50 flex items-center justify-center text-white hover:bg-black/70 transition-colors">
+                  <Icon name="Download" size={14} />
+                </a>
+              )}
+              <button onClick={close}
+                className="w-8 h-8 rounded-full bg-black/50 flex items-center justify-center text-white hover:bg-black/70 transition-colors">
+                <Icon name="X" size={14} />
+              </button>
+            </div>
+          )}
+
+          <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
             <span>{m.time}</span>
             {m.out && (m.status === "read"
               ? <Icon name="CheckCheck" size={10} className="text-violet-500" />
@@ -756,57 +792,6 @@ function VideoNoteMessage({ m }: { m: Message }) {
           </div>
         </div>
       </div>
-
-      {open && m.media_url && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 animate-fade-in"
-          onClick={() => { fullRef.current?.pause(); setOpen(false); setPlaying(false); setProgress(0); }}
-        >
-          <div className="flex flex-col items-center gap-4" onClick={e => e.stopPropagation()}>
-            <div className="relative w-72 h-72 rounded-full overflow-hidden shadow-2xl">
-              <video
-                ref={fullRef}
-                className="w-full h-full object-cover"
-                playsInline
-                onTimeUpdate={onTimeUpdate}
-                onEnded={onEnded}
-                onError={() => { setVideoError(true); setOpen(false); }}
-              >
-                <source src={m.media_url} type="video/mp4" />
-                <source src={m.media_url} type="video/webm" />
-              </video>
-              <svg className="absolute inset-0 w-full h-full -rotate-90 pointer-events-none" viewBox="0 0 100 100">
-                <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="3" />
-                <circle cx="50" cy="50" r="48" fill="none" stroke="white" strokeWidth="3"
-                  strokeDasharray={`${2 * Math.PI * 48}`}
-                  strokeDashoffset={`${2 * Math.PI * 48 * (1 - progress / 100)}`}
-                  style={{ transition: "stroke-dashoffset 0.2s linear" }} />
-              </svg>
-              <button
-                onClick={toggleFullPlay}
-                className="absolute inset-0 flex items-center justify-center"
-              >
-                <div className={`w-14 h-14 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center transition-opacity ${playing ? "opacity-0 hover:opacity-100" : "opacity-100"}`}>
-                  <Icon name={playing ? "Pause" : "Play"} size={26} className="text-white translate-x-0.5" />
-                </div>
-              </button>
-            </div>
-            <div className="flex items-center gap-3">
-              <a href={m.media_url} target="_blank" rel="noreferrer"
-                className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center text-white hover:bg-white/30 transition-colors"
-                onClick={e => e.stopPropagation()}>
-                <Icon name="Download" size={16} />
-              </a>
-              <button
-                onClick={() => { fullRef.current?.pause(); setOpen(false); setPlaying(false); setProgress(0); }}
-                className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center text-white hover:bg-white/30 transition-colors"
-              >
-                <Icon name="X" size={18} />
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </>
   );
 }
@@ -2731,7 +2716,7 @@ function SettingsSection() {
         {
           title: "Внешний вид",
           items: [
-            { label: "Тёмная тема", icon: "Moon", color: "text-indigo-500", isToggle: true, value: darkMode, onClick: () => { setDarkMode(v => !v); document.documentElement.classList.toggle("dark"); } },
+            { label: "Тёмная тема", icon: "Moon", color: "text-indigo-500", isToggle: true, value: darkMode, onClick: () => { const next = !darkMode; setDarkMode(next); document.documentElement.classList.toggle("dark", next); localStorage.setItem("vm_dark", next ? "1" : "0"); } },
           ]
         },
         {
@@ -2856,7 +2841,8 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
   const [inviteCode, setInviteCode] = useState("");
-  const [ctxMenu, setCtxMenu] = useState<{msgId: number; x: number; y: number; out: boolean} | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{msgId: number; x: number; y: number; out: boolean; text?: string; type?: string} | null>(null);
+  const [editingMsgId, setEditingMsgId] = useState<number | null>(null);
   const [reactions, setReactions] = useState<Record<string, {emoji: string; count: number; my: boolean}[]>>({});
   const [showStickerPanel, setShowStickerPanel] = useState(false);
   const [stickerPacks, setStickerPacks] = useState<{id: number; name: string; stickers: {id: number; image_url: string; emoji: string}[]}[]>([]);
@@ -2952,6 +2938,14 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     if (!text) return;
     setInput("");
     setTimeout(() => inputRef.current?.focus(), 50);
+    if (editingMsgId) {
+      const res = await chatsApi.editMessage(editingMsgId, text);
+      if (res.ok) {
+        setMessages(prev => prev.map(m => m.id === editingMsgId ? { ...m, text: res.text, edited: true } : m));
+      }
+      setEditingMsgId(null);
+      return;
+    }
     const res = await chatsApi.send(chat.id, text);
     if (res.ok) {
       setMessages(m => [...m, {
@@ -3059,7 +3053,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     e.preventDefault();
     const x = 'clientX' in e ? e.clientX : e.touches[0].clientX;
     const y = 'clientY' in e ? e.clientY : e.touches[0].clientY;
-    setCtxMenu({ msgId: m.id, x, y, out: m.out });
+    setCtxMenu({ msgId: m.id, x, y, out: m.out, text: m.text, type: m.type });
   };
 
   const handleReaction = async (msgId: number, emoji: string) => {
@@ -3213,18 +3207,16 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
       return (
         <div className={`flex flex-col ${m.out ? "items-end" : "items-start"} animate-fade-in`}>
           <div className={`flex ${m.out ? "justify-end" : "justify-start"} w-full`} {...ctxHandlers}>
-            <div className={`flex flex-col gap-1.5 px-3 py-2.5 rounded-2xl max-w-[260px] w-[230px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
+            <div className={`flex flex-col gap-2 px-3 py-2.5 rounded-2xl max-w-[280px] w-[260px] ${m.out ? "vm-msg-out" : "vm-msg-in"}`}>
               <div className="flex items-center gap-2">
                 <Icon name="Music" size={14} className={m.out ? "text-white/70" : "text-violet-400"} />
                 <span className="text-xs font-medium truncate flex-1">{fname}</span>
+                <a href={m.media_url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
+                  className={`flex-shrink-0 ${m.out ? "text-white/50 hover:text-white" : "text-muted-foreground hover:text-violet-500"} transition-colors`}>
+                  <Icon name="Download" size={13} />
+                </a>
               </div>
-              <audio controls preload="metadata" className="w-full h-8" style={{ colorScheme: "dark" }}>
-                <source src={m.media_url} />
-              </audio>
-              <div className={`flex items-center justify-end gap-1 text-[10px] ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
-                <span>{m.time}</span>
-                {m.out && (m.status === "read" ? <Icon name="CheckCheck" size={10} className="text-cyan-300" /> : <Icon name="CheckCheck" size={10} />)}
-              </div>
+              <VoiceMessage mediaUrl={m.media_url!} dur={0} time={m.time} isOut={!!m.out} status={m.status} />
             </div>
           </div>
           {ReactionsRow}
@@ -3303,8 +3295,9 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
             {!m.out && (chat.type === "group" || chat.type === "channel") && m.sender_name && (
               <div className="text-xs font-semibold mb-1" style={{ color: m.sender_color || "#8b5cf6" }}>{m.sender_name}</div>
             )}
-            <p className="leading-relaxed whitespace-pre-wrap">{m.text}</p>
+            <p className="leading-relaxed whitespace-pre-wrap">{editingMsgId === m.id ? <span className="opacity-50 italic">{m.text}</span> : m.text}</p>
             <div className={`flex items-center justify-end gap-1 mt-1 ${m.out ? "text-white/60" : "text-muted-foreground"}`}>
+              {m.edited && <span className="text-[10px] opacity-60">изменено</span>}
               <span className="text-[10px]">{m.time}</span>
               {m.out && (
                 m.status === "read" ? <Icon name="CheckCheck" size={12} className="text-cyan-300" /> :
@@ -3369,13 +3362,31 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
                 </button>
               ))}
             </div>
+            {/* Copy */}
+            {ctxMenu.text && (
+              <button onClick={() => { navigator.clipboard?.writeText(ctxMenu.text!); setCtxMenu(null); }}
+                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-secondary text-sm transition-colors">
+                <Icon name="Copy" size={16} className="text-muted-foreground" />
+                Копировать
+              </button>
+            )}
+            {/* Edit (own text messages only, ≤15 min) */}
+            {ctxMenu.out && (ctxMenu.type === "text" || ctxMenu.type === "reply") && (
+              <button onClick={() => {
+                setInput(ctxMenu.text || "");
+                setEditingMsgId(ctxMenu.msgId);
+                setCtxMenu(null);
+                setTimeout(() => inputRef.current?.focus(), 50);
+              }} className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-secondary text-sm transition-colors">
+                <Icon name="Pencil" size={16} className="text-violet-400" />
+                Редактировать
+              </button>
+            )}
             {/* Delete (own messages only) */}
             {ctxMenu.out && (
               <button onClick={async () => {
                 const res = await chatsApi.deleteMessage(ctxMenu.msgId);
-                if (res.ok) {
-                  setMessages(prev => prev.filter(m => m.id !== ctxMenu.msgId));
-                }
+                if (res.ok) setMessages(prev => prev.filter(m => m.id !== ctxMenu.msgId));
                 setCtxMenu(null);
               }} className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-red-500/10 text-red-400 text-sm transition-colors">
                 <Icon name="Trash2" size={16} />
@@ -3423,7 +3434,26 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
             <Icon name="MoreVertical" size={18} />
           </button>
           {showChatMenu && (
-            <div className="absolute right-0 top-full mt-1 bg-card rounded-2xl shadow-2xl border border-border p-1 z-50 min-w-[160px] animate-scale-in">
+            <div className="absolute right-0 top-full mt-1 bg-card rounded-2xl shadow-2xl border border-border p-1 z-50 min-w-[180px] animate-scale-in">
+              {chat.type === "private" && chat.username && (
+                <button onClick={() => {
+                  setShowChatMenu(false);
+                  onOpenProfile({ id: 0, username: chat.username!, display_name: chat.name, avatar_color: chat.avatar_color, online: chat.online, status: (chat.user_status || "offline") as "online"|"offline"|"inactive", avatar_url: chat.avatar_url });
+                }} className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-secondary text-sm transition-colors">
+                  <Icon name="User" size={16} className="text-muted-foreground" />
+                  Профиль
+                </button>
+              )}
+              <button onClick={async () => {
+                setShowChatMenu(false);
+                if (!confirm("Очистить историю чата?")) return;
+                const res = await chatsApi.clearHistory(chat.id);
+                if (res.ok) setMessages([]);
+              }} className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-secondary text-sm transition-colors">
+                <Icon name="Eraser" size={16} className="text-muted-foreground" />
+                Очистить историю
+              </button>
+              <div className="border-t border-border my-1" />
               <button onClick={() => { setShowChatMenu(false); handleDeleteChat(); }}
                 className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-red-50 dark:hover:bg-red-900/20 text-red-500 text-sm transition-colors">
                 <Icon name={chat.type === "private" ? "Trash2" : "LogOut"} size={16} />
@@ -3484,7 +3514,7 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
           );
           if (recording) return <VoiceRecorder onSend={sendVoice} onCancel={() => setRecording(false)} />;
           return (
-          <div className="flex items-center gap-1 w-full">
+          <div className="flex items-center gap-1 w-full relative">
             {/* Attach + Emoji в одном меню */}
             <div className="relative flex-shrink-0">
               <button onClick={() => setShowAttachMenu(v => !v)}
@@ -3573,10 +3603,21 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
               )}
             </div>
 
+            {editingMsgId && (
+              <div className="absolute bottom-full left-0 right-0 px-4 pb-1">
+                <div className="flex items-center gap-2 bg-violet-100 dark:bg-violet-900/40 rounded-xl px-3 py-1.5 text-xs text-violet-600 dark:text-violet-300">
+                  <Icon name="Pencil" size={12} />
+                  <span className="flex-1">Редактирование сообщения</span>
+                  <button onClick={() => { setEditingMsgId(null); setInput(""); }} className="text-violet-400 hover:text-violet-600">
+                    <Icon name="X" size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="flex-1 bg-secondary rounded-2xl px-3 py-2 flex items-center min-h-[38px]">
               <input ref={inputRef} value={input} onChange={e => setInput(e.target.value)}
                 onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-                placeholder="Написать..."
+                placeholder={editingMsgId ? "Редактировать..." : "Написать..."}
                 className="flex-1 bg-transparent outline-none text-sm min-w-0" />
             </div>
 

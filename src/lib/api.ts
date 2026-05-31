@@ -77,6 +77,7 @@ export interface Message {
   sender_username: string;
   out: boolean;
   media_url?: string;
+  edited?: boolean;
 }
 
 async function call(baseUrl: string, action: string, method = "GET", body?: object, token?: string | null, extraQuery?: Record<string, string>) {
@@ -205,6 +206,12 @@ export const chatsApi = {
 
   getReactions: (chat_id: number) =>
     call(CHATS_URL, "get_reactions", "GET", undefined, undefined, { chat_id: String(chat_id) }),
+
+  clearHistory: (chat_id: number) =>
+    call(CHATS_URL, "clear_history", "POST", { chat_id }),
+
+  editMessage: (message_id: number, text: string) =>
+    call(CHATS_URL, "edit_message", "POST", { message_id, text }),
 
   getMyPacks: () => call(CHATS_URL, "get_my_packs", "GET"),
   getStickerPacks: () => call(CHATS_URL, "get_sticker_packs", "GET"),
