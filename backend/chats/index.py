@@ -537,6 +537,108 @@ def handler(event: dict, context) -> dict:
             "status": "sent", "out": True, "media_url": cdn_url
         }})
 
+    # upload_chunk — загрузка файла частями (для видео/больших файлов > 4MB)
+    # Схема: клиент шлёт chunks с upload_id, последний chunk с is_last=True → сохраняется сообщение
+    if action == "upload_chunk":
+        upload_id  = body.get("upload_id", "")    # уникальный ID загрузки (генерирует клиент)
+        chunk_idx  = int(body.get("chunk_idx", 0)) # номер чанка 0,1,2...
+        is_last    = bool(body.get("is_last", False))
+        data_b64   = body.get("data", "")
+        # Метаданные — только в первом чанке или в последнем
+        chat_id    = body.get("chat_id")
+        mime_type  = body.get("mime_type", "application/octet-stream")
+        msg_type   = body.get("msg_type", "file")
+        filename   = body.get("filename", "")
+        text       = body.get("text", "")
+        total_chunks = int(body.get("total_chunks", 1))
+
+        if not upload_id or not data_b64:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нужен upload_id и data"})
+
+        # Декодируем чанк
+        try:
+            chunk_data = base64.b64decode(data_b64)
+        except Exception as e:
+            print(f"[CHUNK BASE64 ERROR] {e}")
+            cur.close(); conn.close()
+            return resp(400, {"error": "Ошибка декодирования чанка"})
+
+        s3 = boto3.client(
+            "s3",
+            endpoint_url="https://bucket.poehali.dev",
+            aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+            aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+        )
+
+        # Определяем расширение и ключ
+        if filename and "." in filename:
+            ext = filename.rsplit(".", 1)[-1].lower()[:10]
+        elif mime_type in MIME_EXT:
+            ext = MIME_EXT[mime_type]
+        else:
+            raw = mime_type.split("/")[-1].split(";")[0].strip()
+            ext = raw[:10] if raw else "bin"
+
+        folder_map = {"voice": "voice", "video_note": "video_notes", "image": "images", "video": "videos", "file": "files", "audio": "audio"}
+        folder = folder_map.get(msg_type, "files")
+
+        # Чанк сохраняем как временный объект
+        chunk_key = f"tmp_chunks/{upload_id}/chunk_{chunk_idx:04d}"
+        try:
+            s3.put_object(Bucket="files", Key=chunk_key, Body=chunk_data, ContentType="application/octet-stream")
+        except Exception as e:
+            print(f"[CHUNK S3 ERROR] {e}")
+            cur.close(); conn.close()
+            return resp(500, {"error": "Ошибка сохранения чанка"})
+
+        if not is_last:
+            cur.close(); conn.close()
+            return resp(200, {"ok": True, "chunk_saved": chunk_idx})
+
+        # Последний чанк — собираем все части
+        if not chat_id:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нет chat_id в последнем чанке"})
+
+        cur.execute(f"SELECT 1 FROM {SCHEMA}.vm_chat_members WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return resp(403, {"error": "Нет доступа"})
+
+        # Собираем все чанки в один файл
+        final_key = f"{folder}/{upload_id}.{ext}"
+        cdn_url = f"https://cdn.poehali.dev/projects/{os.environ['AWS_ACCESS_KEY_ID']}/bucket/{final_key}"
+
+        try:
+            all_data = bytearray()
+            for i in range(total_chunks):
+                ck = f"tmp_chunks/{upload_id}/chunk_{i:04d}"
+                obj = s3.get_object(Bucket="files", Key=ck)
+                all_data.extend(obj["Body"].read())
+                # Удаляем временный чанк
+                s3.delete_object(Bucket="files", Key=ck)
+
+            s3.put_object(Bucket="files", Key=final_key, Body=bytes(all_data), ContentType=mime_type)
+            print(f"[CHUNK UPLOAD DONE] upload_id={upload_id} msg_type={msg_type} size={len(all_data)}")
+        except Exception as e:
+            print(f"[CHUNK ASSEMBLE ERROR] {e}")
+            cur.close(); conn.close()
+            return resp(500, {"error": "Ошибка сборки файла"})
+
+        cur.execute(
+            f"INSERT INTO {SCHEMA}.vm_messages (chat_id, sender_id, msg_text, msg_type, msg_status, media_url) VALUES (%s, %s, %s, %s, 'sent', %s) RETURNING id, created_at",
+            (chat_id, user_id, text, msg_type, cdn_url)
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True, "message": {
+            "id": row[0], "time": row[1].strftime("%H:%M"),
+            "text": text, "type": msg_type,
+            "status": "sent", "out": True, "media_url": cdn_url
+        }})
+
     # clear_history — очистить историю чата (сообщения скрываются для пользователя)
     if action == "clear_history":
         chat_id = body.get("chat_id")
@@ -936,12 +1038,19 @@ def handler(event: dict, context) -> dict:
         if not pack_row or pack_row[0] != user_id:
             cur.close(); conn.close()
             return resp(403, {"error": "Нет прав на этот пак"})
-        image_url = upload_to_s3(data_b64, body.get("mime_type", "image/png"), "stickers")
+        try:
+            image_url = upload_to_s3(data_b64, body.get("mime_type", "image/png"), "stickers")
+        except Exception as e:
+            print(f"[S3 ERROR add_sticker] {e}")
+            cur.close(); conn.close()
+            return resp(500, {"error": "Ошибка загрузки стикера"})
         cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.vm_stickers WHERE pack_id=%s", (pack_id,))
         pos = cur.fetchone()[0]
-        cur.execute(f"INSERT INTO {SCHEMA}.vm_stickers (pack_id, image_url, emoji, position) VALUES (%s, %s, %s, %s) RETURNING id", (pack_id, image_url, emoji_tag, pos))
+        cur.execute(
+            f"INSERT INTO {SCHEMA}.vm_stickers (pack_id, image_url, media_url, emoji, position) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (pack_id, image_url, image_url, emoji_tag, pos)
+        )
         sticker_id = cur.fetchone()[0]
-        # Первый стикер — обложка пака
         if pos == 0:
             cur.execute(f"UPDATE {SCHEMA}.vm_sticker_packs SET cover_url=%s WHERE id=%s", (image_url, pack_id))
         conn.commit()

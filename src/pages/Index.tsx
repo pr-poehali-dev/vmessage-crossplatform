@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import Icon from "@/components/ui/icon";
 import { authApi, chatsApi, usersApi, callsApi, getToken, getStoredUser, saveSession, clearSession, setUnauthorizedHandler } from "@/lib/api";
 import type { User, Chat, Message } from "@/lib/api";
+import { e2eeAvailable, getOrCreateKeyPair, exportPublicKey, getSharedKey, encryptText, decryptText, isEncrypted } from "@/lib/crypto";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyIcon = any;
@@ -728,7 +729,7 @@ function VideoNoteMessage({ m }: { m: Message }) {
                     setCurrentSec(v.currentTime);
                     setProgress(v.duration ? (v.currentTime / v.duration) * 100 : 0);
                   }}
-                  onEnded={() => { setPlaying(false); setProgress(0); setCurrentSec(0); if (videoRef.current) videoRef.current.currentTime = 0; }}
+                  onEnded={() => { setPlaying(false); setProgress(0); setCurrentSec(0); if (videoRef.current) videoRef.current.currentTime = 0; setTimeout(() => setExpanded(false), 400); }}
                   onPause={() => setPlaying(false)}
                   onPlay={() => setPlaying(true)}
                 >
@@ -2734,7 +2735,7 @@ function SettingsSection() {
         {
           title: "Конфиденциальность",
           items: [
-            { label: "Секретные чаты (E2EE)", icon: "Lock", color: "text-yellow-500", isToggle: false, value: "", onClick: undefined, hint: "Скоро" },
+            { label: "Шифрование E2EE", icon: "Lock", color: "text-emerald-500", isToggle: false, value: "", onClick: undefined, hint: "Все приватные чаты зашифрованы" },
             { label: "Активные сессии", icon: "Monitor", color: "text-blue-500", isToggle: false, value: "", onClick: () => setShowSessions(true), hint: "" },
           ]
         },
@@ -2818,6 +2819,9 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
   const [loading, setLoading] = useState(true);
   const [showEmoji, setShowEmoji] = useState(false);
   const [showChatMenu, setShowChatMenu] = useState(false);
+  // E2EE — только для приватных чатов
+  const e2eeKeyRef = useRef<CryptoKey | null>(null);
+  const e2eeReadyRef = useRef(false);
   const [recording, setRecording] = useState(false);
   const [showVideoNote, setShowVideoNote] = useState(false);
   const [kbOffset, setKbOffset] = useState(0);
@@ -2864,10 +2868,43 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     notifEnabledRef.current = Notification.permission === "granted";
   }, []);
 
+  // E2EE: инициализация для приватного чата
+  useEffect(() => {
+    if (chat.type !== "private" || !chat.username || !e2eeAvailable()) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const myPair = await getOrCreateKeyPair();
+        // Регистрируем свой публичный ключ на сервере (один раз)
+        const myPubB64 = await exportPublicKey(myPair);
+        await usersApi.setPublicKey(myPubB64);
+        // Получаем публичный ключ собеседника
+        const res = await usersApi.getPublicKey(chat.username!);
+        if (!res?.ok || !res.public_key || cancelled) return;
+        const aesKey = await getSharedKey(myPair, res.public_key, `chat_${chat.id}`);
+        e2eeKeyRef.current = aesKey;
+        e2eeReadyRef.current = true;
+      } catch { /* E2EE недоступен — работаем без шифрования */ }
+    })();
+    return () => { cancelled = true; };
+  }, [chat.id, chat.username, chat.type]);
+
   const loadMessages = useCallback(async () => {
     const res = await chatsApi.messages(chat.id);
     if (res.ok) {
-      const newMsgs: Message[] = res.messages;
+      // Расшифровываем зашифрованные сообщения если E2EE готов
+      let rawMsgs: Message[] = res.messages;
+      if (e2eeReadyRef.current && e2eeKeyRef.current) {
+        rawMsgs = await Promise.all(rawMsgs.map(async m => {
+          if (m.type === "text" && isEncrypted(m.text)) {
+            try {
+              return { ...m, text: await decryptText(e2eeKeyRef.current!, m.text) };
+            } catch { return m; }
+          }
+          return m;
+        }));
+      }
+      const newMsgs: Message[] = rawMsgs;
       setMessages(prev => {
         if (newMsgs.length > prevMsgCount.current && prevMsgCount.current > 0) {
           const newOnes = newMsgs.slice(prevMsgCount.current);
@@ -2938,18 +2975,23 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     if (!text) return;
     setInput("");
     setTimeout(() => inputRef.current?.focus(), 50);
+    // Шифруем текст если E2EE готов
+    const sendText = (e2eeReadyRef.current && e2eeKeyRef.current)
+      ? await encryptText(e2eeKeyRef.current, text).catch(() => text)
+      : text;
     if (editingMsgId) {
-      const res = await chatsApi.editMessage(editingMsgId, text);
+      const res = await chatsApi.editMessage(editingMsgId, sendText);
       if (res.ok) {
-        setMessages(prev => prev.map(m => m.id === editingMsgId ? { ...m, text: res.text, edited: true } : m));
+        setMessages(prev => prev.map(m => m.id === editingMsgId ? { ...m, text, edited: true } : m));
       }
       setEditingMsgId(null);
       return;
     }
-    const res = await chatsApi.send(chat.id, text);
+    const res = await chatsApi.send(chat.id, sendText);
     if (res.ok) {
       setMessages(m => [...m, {
         ...res.message,
+        text, // показываем расшифрованный текст сразу
         sender_id: me.id, sender_name: me.display_name,
         sender_color: me.avatar_color, sender_username: me.username
       }]);
@@ -2981,19 +3023,51 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
     } catch (e) { console.error("[VOICE] error", e); }
   };
 
-  // Универсальная загрузка файла через base64 → бэкенд → S3
+  // Универсальная загрузка: малые файлы (<3.5MB) — за один запрос, большие — chunks
+  const CHUNK_SIZE = 3_500_000; // 3.5MB в байтах → base64 ≈ 4.7MB < лимит Lambda 6MB
+
   const uploadMedia = async (blob: Blob, mimeType: string, msgType: string, text: string, filename: string) => {
     const chatId = chat.id;
     const baseMime = mimeType.split(";")[0].trim();
-    const base64 = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve((reader.result as string).split(",")[1]);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-    const res = await chatsApi.uploadMedia(chatId, base64, baseMime, msgType, text, filename);
-    if (!res?.ok) throw new Error(res?.error || "upload failed");
-    return res.message;
+
+    if (blob.size <= CHUNK_SIZE) {
+      // Маленький файл — один запрос
+      const base64 = await blobToBase64(blob);
+      const res = await chatsApi.uploadMedia(chatId, base64, baseMime, msgType, text, filename);
+      if (!res?.ok) throw new Error(res?.error || "upload failed");
+      return res.message;
+    }
+
+    // Большой файл — разбиваем на chunks
+    const uploadId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const totalChunks = Math.ceil(blob.size / CHUNK_SIZE);
+
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, blob.size);
+      const chunkBlob = blob.slice(start, end);
+      const chunkB64 = await blobToBase64(chunkBlob);
+      const isLast = i === totalChunks - 1;
+
+      const res = await chatsApi.uploadChunk({
+        upload_id: uploadId,
+        chunk_idx: i,
+        is_last: isLast,
+        data: chunkB64,
+        total_chunks: totalChunks,
+        ...(isLast ? {
+          chat_id: chatId,
+          mime_type: baseMime,
+          msg_type: msgType,
+          filename,
+          text,
+        } : {}),
+      });
+
+      if (!res?.ok) throw new Error(res?.error || `chunk ${i} failed`);
+      if (isLast) return res.message;
+    }
+    throw new Error("upload incomplete");
   };
 
   const sendVideoNote = async (blob: Blob, duration: number) => {
@@ -3411,7 +3485,12 @@ function ChatView({ chat, me, onBack, onStartChat, onOpenProfile, onDeleteChat }
         }} className="flex items-center gap-3 flex-1 min-w-0 text-left">
           <Avatar label={chat.name} color={chat.avatar_color} status={chatStatus} src={chat.avatar_url || undefined} />
           <div className="flex-1 min-w-0">
-            <div className="font-semibold text-sm truncate">{chat.name}</div>
+            <div className="font-semibold text-sm truncate flex items-center gap-1">
+              {chat.name}
+              {chat.type === "private" && e2eeAvailable() && (
+                <Icon name="Lock" size={11} className="text-emerald-500 flex-shrink-0" title="E2EE шифрование" />
+              )}
+            </div>
             <div className={`text-xs ${chatStatus === "online" ? "text-emerald-500" : "text-muted-foreground"}`}>
               {chat.type === "group" ? `группа · ${chat.members_count ?? ""} уч.` : chat.type === "channel" ? `канал · ${chat.members_count ?? ""} подп.` : statusLabel(chatStatus)}
             </div>

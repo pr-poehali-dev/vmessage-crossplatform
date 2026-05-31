@@ -207,6 +207,12 @@ export const chatsApi = {
   getReactions: (chat_id: number) =>
     call(CHATS_URL, "get_reactions", "GET", undefined, undefined, { chat_id: String(chat_id) }),
 
+  uploadChunk: (params: {
+    upload_id: string; chunk_idx: number; is_last: boolean;
+    data: string; total_chunks: number;
+    chat_id?: number; mime_type?: string; msg_type?: string; filename?: string; text?: string;
+  }) => call(CHATS_URL, "upload_chunk", "POST", params),
+
   clearHistory: (chat_id: number) =>
     call(CHATS_URL, "clear_history", "POST", { chat_id }),
 
@@ -258,6 +264,12 @@ export const usersApi = {
 
   setStatus: (online: boolean) =>
     call(USERS_URL, "set_status", "POST", { online }),
+
+  setPublicKey: (public_key: string) =>
+    call(USERS_URL, "set_public_key", "POST", { public_key }),
+
+  getPublicKey: (username: string) =>
+    call(USERS_URL, "get_public_key", "GET", undefined, undefined, { username }),
 };
 
 // Calls (WebRTC signaling)

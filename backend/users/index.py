@@ -294,5 +294,35 @@ def handler(event: dict, context) -> dict:
         cur.close(); conn.close()
         return resp(200, {"ok": True, "blocked": is_blocked})
 
+    # set_public_key — сохранить публичный ECDH-ключ устройства
+    if action == "set_public_key":
+        public_key = (body.get("public_key") or "").strip()
+        if not public_key:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нет public_key"})
+        cur.execute(
+            f"UPDATE {SCHEMA}.vm_users SET public_key=%s WHERE id=%s",
+            (public_key, user_id)
+        )
+        conn.commit()
+        cur.close(); conn.close()
+        return resp(200, {"ok": True})
+
+    # get_public_key — получить публичный ключ пользователя по username
+    if action == "get_public_key":
+        username = (qs.get("username") or body.get("username") or "").strip().lower()
+        if not username:
+            cur.close(); conn.close()
+            return resp(400, {"error": "Нет username"})
+        cur.execute(
+            f"SELECT public_key FROM {SCHEMA}.vm_users WHERE username=%s AND is_active=TRUE",
+            (username,)
+        )
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if not row:
+            return resp(404, {"error": "Пользователь не найден"})
+        return resp(200, {"ok": True, "public_key": row[0]})
+
     cur.close(); conn.close()
     return resp(404, {"error": "Unknown action"})
